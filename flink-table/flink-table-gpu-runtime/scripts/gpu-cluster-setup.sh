@@ -112,12 +112,18 @@ fi
 # raise it if you raise the batch size or the slot count.
 OFF_HEAP="${OFF_HEAP:-4g}"
 
-# Total process memory has to cover that budget and everything else the TaskManager needs. The
-# stock 1728m does not: Flink adds the off-heap request to heap, managed and network memory and
-# refuses to start when the sum exceeds the total. start-cluster.sh reports that failure only in
-# the TaskManager's .out file, so the symptom is a cluster with a JobManager and no workers, and a
-# first job that hangs forever waiting for a slot that will never be offered.
-PROCESS_MEM="${PROCESS_MEM:-8g}"
+# Total process memory has to cover that budget and everything else the TaskManager needs, and it
+# has to grow faster than the budget does: managed and network memory are *fractions* of the total
+# (0.4 and 0.1 by default), so every gigabyte added to the total gives only half a gigabyte back.
+# At 8g with a 4g budget the sum comes to 7.72g against 6.95g available and the TaskManager refuses
+# to start; 16g leaves comfortable headroom.
+#
+# The failure is worth recognising because it does not look like a memory problem.
+# start-cluster.sh reports it only in the TaskManager's .out file, so what you see is a cluster
+# with a JobManager and no workers, a job that is accepted, and a wait for a slot that never
+# arrives. If you raise OFF_HEAP, raise this too, and if the TaskManager will not start look for
+# "exceed configured Total Flink Memory".
+PROCESS_MEM="${PROCESS_MEM:-16g}"
 
 # Flatten the argfile into one line. Comments and blank lines go; everything else is a JVM flag.
 FLAGS=$(TORNADOVM_HOME="${TORNADOVM_HOME}" envsubst < "${TORNADOVM_HOME}/tornado-argfile.template" \
