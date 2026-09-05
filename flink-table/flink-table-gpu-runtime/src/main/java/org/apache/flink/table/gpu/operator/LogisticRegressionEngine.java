@@ -231,6 +231,37 @@ public final class LogisticRegressionEngine implements AutoCloseable {
     /**
      * The pure-TornadoVM arm: a generated forward pass and {@code @Reduce} for the contraction.
      *
+     * <p><b>This does not run on TornadoVM 6.0.1.</b> It is kept because the way it fails is the
+     * answer to whether {@code @Reduce} could serve a SQL aggregate, and because anyone
+     * re-attempting it should not have to rediscover the sequence. Four obstacles, in the order
+     * they appear:
+     *
+     * <ol>
+     *   <li><b>No fusion.</b> {@code MultipleReductions} says so, and {@code ReduceTaskGraph} reads
+     *       its result from index 0 of the annotated array, so an <em>n</em>-output contraction is
+     *       <em>n</em> kernels over <em>n</em> single-element arrays, each re-reading the input.
+     *   <li><b>The loop bound must come from the array.</b> Bounding by an {@code int} parameter
+     *       makes {@code ReduceCodeAnalysis.obtainLoopBoundForPanamaRegions} fail a {@code
+     *       requireNonNull}, and the execution dies with a bare {@code NullPointerException} that
+     *       names nothing. Use {@code array.getSize()} or a constant.
+     *   <li><b>Every task parameter must be declared</b> in a transfer list, including pure
+     *       intermediates that the plain graph is happy to leave undeclared.
+     *   <li><b>And declaring them is not enough.</b> With all four buffers in one {@code
+     *       EVERY_EXECUTION} call it still reports the first parameter of the <em>non-reduce</em>
+     *       task as undeclared. Every reduction test TornadoVM ships builds a graph containing
+     *       exactly one task, which is the reduction; there is no example of a {@code @Reduce} task
+     *       beside an ordinary one, and this graph has thirty-four.
+     * </ol>
+     *
+     * <p>Splitting into two plans would sidestep the last point, but the intermediate would have to
+     * round-trip through the host and {@code X} would be re-uploaded for the reduction plan --
+     * 66&nbsp;MB a pass, which measures the workaround rather than the tiling.
+     *
+     * <p>So the conclusion is not that {@code @Reduce} is slow. It is that it cannot express a
+     * multi-output contraction inside a larger pipeline, which is the shape every interesting SQL
+     * aggregate has. Whether its tiling is fast for a single reduction in a graph of its own is
+     * still unmeasured, and a microbenchmark could settle it -- but it would not change this.
+     *
      * <p>It differs from the "generated" arm in the backward pass alone, so the gap between those
      * two is attributable to the reduction and nothing else.
      *
