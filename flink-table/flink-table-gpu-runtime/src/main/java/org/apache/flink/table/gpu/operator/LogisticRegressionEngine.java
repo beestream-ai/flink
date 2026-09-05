@@ -279,7 +279,12 @@ public final class LogisticRegressionEngine implements AutoCloseable {
     public static void reduceColumn(
             FloatArray x, FloatArray z, @Reduce FloatArray out, int rows, int f) {
         out.set(0, 0.0f);
-        for (@Parallel int r = 0; r < rows; r++) {
+        // The bound has to be z.getSize() rather than the rows parameter. ReduceCodeAnalysis
+        // derives the reduction's input range from the loop bound to size its partials array, and
+        // with a plain int parameter it cannot: obtainLoopBoundForPanamaRegions fails a
+        // requireNonNull and the whole execution dies with a bare NullPointerException. Every
+        // reduction in TornadoVM's own tests uses either array.getSize() or a constant.
+        for (@Parallel int r = 0; r < z.getSize(); r++) {
             out.set(0, out.get(0) + x.get(f * rows + r) * z.get(r));
         }
     }
