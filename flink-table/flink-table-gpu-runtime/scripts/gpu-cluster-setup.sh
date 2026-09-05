@@ -105,6 +105,13 @@ else
     echo "note: no flink-sql-parquet jar found; csv will work, parquet will not" >&2
 fi
 
+# Off-heap budget for the staging buffers. Each offloaded subtask holds batch-size doubles per
+# input column plus its outputs -- about 6 MiB at the default batch of 262,144 -- and TornadoVM
+# allocates its own on top. This is per TaskManager, not per slot, so it has to cover every subtask
+# that might run there at once. 4g is enough for 32 subtasks at the default batch size, measured;
+# raise it if you raise the batch size or the slot count.
+OFF_HEAP="${OFF_HEAP:-4g}"
+
 # Flatten the argfile into one line. Comments and blank lines go; everything else is a JVM flag.
 FLAGS=$(TORNADOVM_HOME="${TORNADOVM_HOME}" envsubst < "${TORNADOVM_HOME}/tornado-argfile.template" \
         | grep -vE '^\s*#' | grep -vE '^\s*$' | tr '\n' ' ' | sed 's/  */ /g; s/ $//')
@@ -121,8 +128,19 @@ if [[ ! -f "${PRISTINE}" ]]; then
     cp "${CONFIG}" "${PRISTINE}"
 fi
 
-awk -v flags="${FLAGS}" '
-    !done && /^      all: / { print $0 " " flags; done = 1; next }
+awk -v flags="${FLAGS}" -v offheap="${OFF_HEAP}" '
+    !flagged && /^      all: / { print $0 " " flags; flagged = 1; next }
+    # TornadoVM stages through java.lang.foreign, and those allocations are counted against the
+    # JVM direct-memory limit. Flink derives that limit from task.off-heap.size, which defaults to
+    # zero because Flink has no idea the operator allocates anything off-heap. At parallelism 1 the
+    # framework reserve absorbs it; above about four subtasks per TaskManager it does not, and the
+    # job dies with "OutOfMemoryError: Direct buffer memory" -- sometimes indirectly, as a kernel
+    # that fails to compile because javac cannot get a buffer either.
+    # Only under taskmanager: -- jobmanager has a memory block too, and it is the one that
+    # comes first in the file.
+    /^taskmanager:/ { in_tm = 1 }
+    in_tm && !sized && /^  memory:/ { print "  memory:"; print "    task:"; print "      off-heap:";
+                                      print "        size: " offheap; sized = 1; next }
     { print }
 ' "${PRISTINE}" > "${CONFIG}.tmp"
 
@@ -131,7 +149,13 @@ if ! grep -q -- "--enable-preview" "${CONFIG}.tmp"; then
     echo "could not find 'env.java.opts.all' in ${PRISTINE} to append to" >&2
     exit 1
 fi
+if ! grep -q "off-heap" "${CONFIG}.tmp"; then
+    rm -f "${CONFIG}.tmp"
+    echo "could not find 'taskmanager.memory' in ${PRISTINE} to size off-heap under" >&2
+    exit 1
+fi
 mv "${CONFIG}.tmp" "${CONFIG}"
 
 echo "wrote TornadoVM flags to ${CONFIG}"
+echo "set taskmanager.memory.task.off-heap.size=${OFF_HEAP}"
 echo "TORNADOVM_HOME=${TORNADOVM_HOME}"
