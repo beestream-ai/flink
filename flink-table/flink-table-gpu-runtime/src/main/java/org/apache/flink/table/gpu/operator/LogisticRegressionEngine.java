@@ -244,7 +244,12 @@ public final class LogisticRegressionEngine implements AutoCloseable {
     private TaskGraph reduceGraph() {
         TaskGraph graph =
                 new TaskGraph("logistic")
-                        .transferToDevice(DataTransferMode.FIRST_EXECUTION, x, y)
+                        // z has to be declared even though it is a pure intermediate that is
+                        // overwritten every pass. The plain graph tolerates an undeclared
+                        // intermediate; the reduce rewrite validates every task parameter and
+                        // fails with "not specified either in transferToDevice or transferToHost".
+                        // FIRST_EXECUTION, so declaring it costs one 2 MB transfer, not one a pass.
+                        .transferToDevice(DataTransferMode.FIRST_EXECUTION, x, y, z)
                         .transferToDevice(DataTransferMode.EVERY_EXECUTION, weights)
                         .task(
                                 "forward",
