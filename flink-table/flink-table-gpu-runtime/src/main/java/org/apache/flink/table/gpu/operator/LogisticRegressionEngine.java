@@ -78,6 +78,9 @@ public final class LogisticRegressionEngine implements AutoCloseable {
     private final int features;
     private final float learningRate;
 
+    /** Whether the two contractions go to cuBLAS or to generated kernels. */
+    private final boolean useLibrary;
+
     /** Column-major {@code rows x features}, so a feature's values are contiguous for cuBLAS. */
     private final FloatArray x;
 
@@ -91,11 +94,14 @@ public final class LogisticRegressionEngine implements AutoCloseable {
 
     private TornadoExecutionPlan plan;
     private int staged;
+    private double trainMillis;
 
-    public LogisticRegressionEngine(int rows, int features, float learningRate) {
+    public LogisticRegressionEngine(
+            int rows, int features, float learningRate, boolean useLibrary) {
         this.rows = rows;
         this.features = features;
         this.learningRate = learningRate;
+        this.useLibrary = useLibrary;
         this.x = new FloatArray(rows * features);
         this.y = new FloatArray(rows);
         this.weights = new FloatArray(features);
@@ -127,37 +133,70 @@ public final class LogisticRegressionEngine implements AutoCloseable {
     public void open() {
         TaskGraph graph =
                 new TaskGraph("logistic")
-                        .transferToDevice(DataTransferMode.FIRST_EXECUTION, x, y, weights)
-                        .libraryTask(
-                                "forward",
-                                CuBlas::cublasSgemv,
-                                CuBlasOperation.CUBLAS_OP_N.operation(),
-                                rows,
-                                features,
-                                1.0f,
-                                x,
-                                rows,
-                                weights,
-                                1,
-                                0.0f,
-                                z,
-                                1)
-                        .task("residual", LogisticRegressionEngine::residual, z, y, rows)
-                        .libraryTask(
-                                "backward",
-                                CuBlas::cublasSgemv,
-                                CuBlasOperation.CUBLAS_OP_T.operation(),
-                                rows,
-                                features,
-                                1.0f,
-                                x,
-                                rows,
-                                z,
-                                1,
-                                0.0f,
-                                gradient,
-                                1)
-                        .task(
+                        .transferToDevice(DataTransferMode.FIRST_EXECUTION, x, y, weights);
+
+        // z = X w
+        if (useLibrary) {
+            graph =
+                    graph.libraryTask(
+                            "forward",
+                            CuBlas::cublasSgemv,
+                            CuBlasOperation.CUBLAS_OP_N.operation(),
+                            rows,
+                            features,
+                            1.0f,
+                            x,
+                            rows,
+                            weights,
+                            1,
+                            0.0f,
+                            z,
+                            1);
+        } else {
+            graph =
+                    graph.task(
+                            "forward",
+                            LogisticRegressionEngine::forward,
+                            x,
+                            weights,
+                            z,
+                            rows,
+                            features);
+        }
+
+        graph = graph.task("residual", LogisticRegressionEngine::residual, z, y, rows);
+
+        // g = X' r
+        if (useLibrary) {
+            graph =
+                    graph.libraryTask(
+                            "backward",
+                            CuBlas::cublasSgemv,
+                            CuBlasOperation.CUBLAS_OP_T.operation(),
+                            rows,
+                            features,
+                            1.0f,
+                            x,
+                            rows,
+                            z,
+                            1,
+                            0.0f,
+                            gradient,
+                            1);
+        } else {
+            graph =
+                    graph.task(
+                            "backward",
+                            LogisticRegressionEngine::backward,
+                            x,
+                            z,
+                            gradient,
+                            rows,
+                            features);
+        }
+
+        graph =
+                graph.task(
                                 "update",
                                 LogisticRegressionEngine::update,
                                 weights,
@@ -168,8 +207,44 @@ public final class LogisticRegressionEngine implements AutoCloseable {
         plan = new TornadoExecutionPlan(graph.snapshot());
     }
 
+    /**
+     * {@code z = X w}, generated.
+     *
+     * <p>One thread per row, so the parallelism is the row count -- hundreds of thousands of it.
+     * This is the contraction a generated kernel is well suited to.
+     */
+    public static void forward(FloatArray x, FloatArray w, FloatArray z, int rows, int features) {
+        for (@Parallel int r = 0; r < rows; r++) {
+            float sum = 0.0f;
+            for (int f = 0; f < features; f++) {
+                sum += x.get(f * rows + r) * w.get(f);
+            }
+            z.set(r, sum);
+        }
+    }
+
+    /**
+     * {@code g = X' r}, generated.
+     *
+     * <p>One thread per <em>feature</em>, each walking every row. That is tens of threads on a
+     * device with thousands of cores, and it is the honest comparison rather than a handicap: it is
+     * what this project's generator emits from a {@code RexNode} tree, which is a {@code @Parallel}
+     * loop over the output and a sequential loop inside it. A tiled parallel reduction is what
+     * cuBLAS brings and what the generator has no way to express.
+     */
+    public static void backward(FloatArray x, FloatArray z, FloatArray g, int rows, int features) {
+        for (@Parallel int f = 0; f < features; f++) {
+            float sum = 0.0f;
+            for (int r = 0; r < rows; r++) {
+                sum += x.get(f * rows + r) * z.get(r);
+            }
+            g.set(f, sum);
+        }
+    }
+
     /** Runs {@code iterations} passes. No data crosses the bus after the first. */
     public void train(int iterations) {
+        long start = System.nanoTime();
         try {
             TornadoExecutionResult result = null;
             for (int i = 0; i < iterations; i++) {
@@ -182,6 +257,19 @@ public final class LogisticRegressionEngine implements AutoCloseable {
         } catch (Exception e) {
             throw new IllegalStateException("logistic regression execution failed", e);
         }
+        trainMillis = (System.nanoTime() - start) / 1e6;
+    }
+
+    /**
+     * How long the iterations took, excluding staging.
+     *
+     * <p>A diagnostic, not the result. End to end is what a user experiences and is what the
+     * benchmark reports; this exists only to explain an end-to-end number after the fact -- in
+     * particular, to say whether two contraction choices tie because they are equally good or
+     * because both are lost in the cost of reading the input.
+     */
+    public double trainMillis() {
+        return trainMillis;
     }
 
     /**

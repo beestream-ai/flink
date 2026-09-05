@@ -96,13 +96,15 @@ public final class LogisticRegressionBenchmark {
         }
 
         System.out.printf(
-                "data=%s  rows=%,d  features=%d  iterations=%d  parallelism=%d  gpu=%s  runs=%d%n",
+                "data=%s  rows=%,d  features=%d  iterations=%d  parallelism=%d  gpu=%s"
+                        + "  contraction=%s  runs=%d%n",
                 parsed.data,
                 parsed.rows,
                 parsed.features,
                 parsed.iterations,
                 parsed.parallelism,
                 parsed.gpu,
+                parsed.library ? "library" : "generated",
                 parsed.runs);
 
         double[] first = null;
@@ -170,7 +172,11 @@ public final class LogisticRegressionBenchmark {
                                 "logistic",
                                 PrimitiveArrayTypeInfo.DOUBLE_PRIMITIVE_ARRAY_TYPE_INFO,
                                 new LogisticOperator(
-                                        args.rows, args.features, args.iterations, LEARNING_RATE));
+                                        args.rows,
+                                        args.features,
+                                        args.iterations,
+                                        LEARNING_RATE,
+                                        args.library));
 
         try (CloseableIterator<double[]> it = trained.executeAndCollect()) {
             return it.next();
@@ -193,19 +199,22 @@ public final class LogisticRegressionBenchmark {
         private final int features;
         private final int iterations;
         private final double learningRate;
+        private final boolean library;
         private transient LogisticRegressionEngine engine;
 
-        private LogisticOperator(int rows, int features, int iterations, double learningRate) {
+        private LogisticOperator(
+                int rows, int features, int iterations, double learningRate, boolean library) {
             this.rows = rows;
             this.features = features;
             this.iterations = iterations;
             this.learningRate = learningRate;
+            this.library = library;
         }
 
         @Override
         public void open() throws Exception {
             super.open();
-            engine = new LogisticRegressionEngine(rows, features, (float) learningRate);
+            engine = new LogisticRegressionEngine(rows, features, (float) learningRate, library);
         }
 
         @Override
@@ -219,9 +228,15 @@ public final class LogisticRegressionBenchmark {
 
         @Override
         public void endInput() {
-            LOG.info("logistic: staged {} rows, {} iterations", engine.staged(), iterations);
             engine.open();
             engine.train(iterations);
+            // A diagnostic line, so an end-to-end tie can be explained rather than guessed at.
+            LOG.info(
+                    "logistic: {} rows, {} iterations, contraction={}, loop {} ms",
+                    engine.staged(),
+                    iterations,
+                    library ? "library" : "generated",
+                    String.format("%.1f", engine.trainMillis()));
             output.collect(new StreamRecord<>(engine.weights()));
         }
 
@@ -328,6 +343,12 @@ public final class LogisticRegressionBenchmark {
         private boolean gpu;
         private boolean generate;
 
+        /**
+         * Which of the two contractions to use. Only the GEMVs change: the elementwise steps have
+         * no library alternative, so this switch isolates what cuBLAS contributes.
+         */
+        private boolean library = true;
+
         static Args parse(String[] argv) {
             Args args = new Args();
             for (int i = 0; i < argv.length; i++) {
@@ -346,6 +367,13 @@ public final class LogisticRegressionBenchmark {
                     args.runs = Integer.parseInt(argv[++i]);
                 } else if ("--gpu".equals(flag)) {
                     args.gpu = Boolean.parseBoolean(argv[++i]);
+                } else if ("--contraction".equals(flag)) {
+                    String mode = argv[++i];
+                    if (!"library".equals(mode) && !"generated".equals(mode)) {
+                        throw new IllegalArgumentException(
+                                "--contraction must be library or generated, not " + mode);
+                    }
+                    args.library = "library".equals(mode);
                 } else if ("--generate".equals(flag)) {
                     args.generate = true;
                 } else {
