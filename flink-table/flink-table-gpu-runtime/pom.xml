@@ -86,6 +86,20 @@ under the License.
 			<version>${tornado.version}</version>
 			<scope>provided</scope>
 		</dependency>
+		<!--
+			The cuBLAS binding, for the hybrid path in GramMatrixSweep: a generated kernel and a
+			library call sharing device buffers in one TaskGraph. Nothing in the offload operator
+			uses it, so a distribution without it still runs every Calc.
+
+			It needs no JNI native of its own. TornadoVM 6 binds through java.lang.foreign and
+			dlopens the system libcublas, so the only run-time requirement is a CUDA install.
+		-->
+		<dependency>
+			<groupId>io.github.beehive-lab</groupId>
+			<artifactId>tornado-cublas</artifactId>
+			<version>${tornado.version}</version>
+			<scope>provided</scope>
+		</dependency>
 	</dependencies>
 
 	<build>
