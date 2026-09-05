@@ -22,6 +22,7 @@ import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
 import uk.ac.manchester.tornado.api.TornadoExecutionResult;
 import uk.ac.manchester.tornado.api.annotations.Parallel;
+import uk.ac.manchester.tornado.api.annotations.Reduce;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.math.TornadoMath;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
@@ -78,8 +79,17 @@ public final class LogisticRegressionEngine implements AutoCloseable {
     private final int features;
     private final float learningRate;
 
-    /** Whether the two contractions go to cuBLAS or to generated kernels. */
-    private final boolean useLibrary;
+    /** Which contraction to use: "library", "generated" or "reduce". */
+    private final String contraction;
+
+    /**
+     * One single-element array per gradient component, used only by the "reduce" arm.
+     *
+     * <p>There is one per feature because {@code @Reduce} cannot fuse: {@code ReduceTaskGraph}
+     * reads its result from index 0 of the annotated array, so an <em>n</em>-output reduction is
+     * <em>n</em> separate kernels over <em>n</em> separate arrays, each re-reading the residual.
+     */
+    private final FloatArray[] partials;
 
     /** Column-major {@code rows x features}, so a feature's values are contiguous for cuBLAS. */
     private final FloatArray x;
@@ -97,11 +107,17 @@ public final class LogisticRegressionEngine implements AutoCloseable {
     private double trainMillis;
 
     public LogisticRegressionEngine(
-            int rows, int features, float learningRate, boolean useLibrary) {
+            int rows, int features, float learningRate, String contraction) {
         this.rows = rows;
         this.features = features;
         this.learningRate = learningRate;
-        this.useLibrary = useLibrary;
+        this.contraction = contraction;
+        this.partials = new FloatArray[features];
+        if ("reduce".equals(contraction)) {
+            for (int f = 0; f < features; f++) {
+                partials[f] = new FloatArray(1);
+            }
+        }
         this.x = new FloatArray(rows * features);
         this.y = new FloatArray(rows);
         this.weights = new FloatArray(features);
@@ -131,12 +147,17 @@ public final class LogisticRegressionEngine implements AutoCloseable {
      * plan, which is what keeps the data resident: only the first moves {@code X} and {@code y}.
      */
     public void open() {
+        if ("reduce".equals(contraction)) {
+            plan = new TornadoExecutionPlan(reduceGraph().snapshot());
+            return;
+        }
+
         TaskGraph graph =
                 new TaskGraph("logistic")
                         .transferToDevice(DataTransferMode.FIRST_EXECUTION, x, y, weights);
 
         // z = X w
-        if (useLibrary) {
+        if ("library".equals(contraction)) {
             graph =
                     graph.libraryTask(
                             "forward",
@@ -167,7 +188,7 @@ public final class LogisticRegressionEngine implements AutoCloseable {
         graph = graph.task("residual", LogisticRegressionEngine::residual, z, y, rows);
 
         // g = X' r
-        if (useLibrary) {
+        if ("library".equals(contraction)) {
             graph =
                     graph.libraryTask(
                             "backward",
@@ -205,6 +226,62 @@ public final class LogisticRegressionEngine implements AutoCloseable {
                                 features)
                         .transferToHost(DataTransferMode.UNDER_DEMAND, weights);
         plan = new TornadoExecutionPlan(graph.snapshot());
+    }
+
+    /**
+     * The pure-TornadoVM arm: a generated forward pass and {@code @Reduce} for the contraction.
+     *
+     * <p>It differs from the "generated" arm in the backward pass alone, so the gap between those
+     * two is attributable to the reduction and nothing else.
+     *
+     * <p>Three costs come from the same limitation. {@code @Reduce} cannot fuse, so there is one
+     * kernel and one single-element array per feature, each re-reading the residual: the scan is
+     * paid <em>features</em> times rather than once. There is no way to combine those outputs on
+     * the device either, since a task cannot take 32 arrays, so the weights are updated on the host
+     * and re-uploaded every pass. And the weights therefore cannot stay resident the way they do in
+     * the other two arms. All three are consequences of no fusion rather than free choices.
+     */
+    private TaskGraph reduceGraph() {
+        TaskGraph graph =
+                new TaskGraph("logistic")
+                        .transferToDevice(DataTransferMode.FIRST_EXECUTION, x, y)
+                        .transferToDevice(DataTransferMode.EVERY_EXECUTION, weights)
+                        .task(
+                                "forward",
+                                LogisticRegressionEngine::forward,
+                                x,
+                                weights,
+                                z,
+                                rows,
+                                features)
+                        .task("residual", LogisticRegressionEngine::residual, z, y, rows);
+        for (int f = 0; f < features; f++) {
+            graph =
+                    graph.task(
+                            "g" + f,
+                            LogisticRegressionEngine::reduceColumn,
+                            x,
+                            z,
+                            partials[f],
+                            rows,
+                            f);
+        }
+        return graph.transferToHost(DataTransferMode.EVERY_EXECUTION, (Object[]) partials);
+    }
+
+    /**
+     * One gradient component, as a TornadoVM reduction.
+     *
+     * <p>The naive loop is what the programmer writes; {@code ReduceTaskGraph} rewrites it into a
+     * tree reduction with device-sized partials. That is the tiling a generator cannot express by
+     * itself, which is the point of measuring it.
+     */
+    public static void reduceColumn(
+            FloatArray x, FloatArray z, @Reduce FloatArray out, int rows, int f) {
+        out.set(0, 0.0f);
+        for (@Parallel int r = 0; r < rows; r++) {
+            out.set(0, out.get(0) + x.get(f * rows + r) * z.get(r));
+        }
     }
 
     /**
@@ -246,6 +323,18 @@ public final class LogisticRegressionEngine implements AutoCloseable {
     public void train(int iterations) {
         long start = System.nanoTime();
         try {
+            if ("reduce".equals(contraction)) {
+                float step = learningRate / rows;
+                for (int i = 0; i < iterations; i++) {
+                    plan.execute();
+                    // No device-side combine is possible, so the step happens here.
+                    for (int f = 0; f < features; f++) {
+                        weights.set(f, weights.get(f) - step * partials[f].get(0));
+                    }
+                }
+                trainMillis = (System.nanoTime() - start) / 1e6;
+                return;
+            }
             TornadoExecutionResult result = null;
             for (int i = 0; i < iterations; i++) {
                 result = plan.execute();

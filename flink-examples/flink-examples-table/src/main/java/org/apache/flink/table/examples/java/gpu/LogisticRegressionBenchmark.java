@@ -104,7 +104,7 @@ public final class LogisticRegressionBenchmark {
                 parsed.iterations,
                 parsed.parallelism,
                 parsed.gpu,
-                parsed.library ? "library" : "generated",
+                parsed.contraction,
                 parsed.runs);
 
         double[] first = null;
@@ -176,7 +176,7 @@ public final class LogisticRegressionBenchmark {
                                         args.features,
                                         args.iterations,
                                         LEARNING_RATE,
-                                        args.library));
+                                        args.contraction));
 
         try (CloseableIterator<double[]> it = trained.executeAndCollect()) {
             return it.next();
@@ -199,22 +199,23 @@ public final class LogisticRegressionBenchmark {
         private final int features;
         private final int iterations;
         private final double learningRate;
-        private final boolean library;
+        private final String contraction;
         private transient LogisticRegressionEngine engine;
 
         private LogisticOperator(
-                int rows, int features, int iterations, double learningRate, boolean library) {
+                int rows, int features, int iterations, double learningRate, String contraction) {
             this.rows = rows;
             this.features = features;
             this.iterations = iterations;
             this.learningRate = learningRate;
-            this.library = library;
+            this.contraction = contraction;
         }
 
         @Override
         public void open() throws Exception {
             super.open();
-            engine = new LogisticRegressionEngine(rows, features, (float) learningRate, library);
+            engine =
+                    new LogisticRegressionEngine(rows, features, (float) learningRate, contraction);
         }
 
         @Override
@@ -235,7 +236,7 @@ public final class LogisticRegressionBenchmark {
                     "logistic: {} rows, {} iterations, contraction={}, loop {} ms",
                     engine.staged(),
                     iterations,
-                    library ? "library" : "generated",
+                    contraction,
                     String.format("%.1f", engine.trainMillis()));
             output.collect(new StreamRecord<>(engine.weights()));
         }
@@ -344,10 +345,11 @@ public final class LogisticRegressionBenchmark {
         private boolean generate;
 
         /**
-         * Which of the two contractions to use. Only the GEMVs change: the elementwise steps have
-         * no library alternative, so this switch isolates what cuBLAS contributes.
+         * Which contraction to use. Only the GEMVs change, so this isolates what cuBLAS
+         * contributes: {@code library} is cuBLAS, {@code generated} the naive kernel this project's
+         * generator would emit, {@code reduce} TornadoVM's own {@code @Reduce}.
          */
-        private boolean library = true;
+        private String contraction = "library";
 
         static Args parse(String[] argv) {
             Args args = new Args();
@@ -369,11 +371,13 @@ public final class LogisticRegressionBenchmark {
                     args.gpu = Boolean.parseBoolean(argv[++i]);
                 } else if ("--contraction".equals(flag)) {
                     String mode = argv[++i];
-                    if (!"library".equals(mode) && !"generated".equals(mode)) {
+                    if (!"library".equals(mode)
+                            && !"generated".equals(mode)
+                            && !"reduce".equals(mode)) {
                         throw new IllegalArgumentException(
-                                "--contraction must be library or generated, not " + mode);
+                                "--contraction must be library, generated or reduce, not " + mode);
                     }
-                    args.library = "library".equals(mode);
+                    args.contraction = mode;
                 } else if ("--generate".equals(flag)) {
                     args.generate = true;
                 } else {
