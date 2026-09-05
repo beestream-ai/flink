@@ -70,16 +70,22 @@ under the License.
 			<version>${project.version}</version>
 		</dependency>
 		<!--
-			Runtime scope: the example compiles against the Table API alone and never references
-			this module. It is here so that the GpuOperatorFactoryProvider is on the classpath and
-			ServiceLoader can find it, which is what putting the jar in a distribution's lib/ does
-			for a real deployment. Without it the planner silently falls back to CPU.
+			Provided scope, for two different reasons at once. GpuOffloadExample and
+			HaversineBenchmark never reference this module: they need it only so that
+			ServiceLoader finds GpuOperatorFactoryProvider, which is what putting the jar in a
+			distribution's lib/ does for a real deployment; without it the planner silently
+			falls back to CPU. FeatureGramBenchmark does reference it, for FeatureGramEngine,
+			because no planner path reaches an aggregate yet and the example has to drive the
+			device itself.
+
+			Not compile scope: the jar belongs to the cluster, not to an example's jar, and it
+			drags TornadoVM behind it.
 		-->
 		<dependency>
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-table-gpu-runtime</artifactId>
 			<version>${project.version}</version>
-			<scope>runtime</scope>
+			<scope>provided</scope>
 		</dependency>
 
 		<dependency>
@@ -364,6 +370,30 @@ under the License.
 
 							<includes>
 								<include>org/apache/flink/table/examples/java/gpu/HaversineBenchmark*</include>
+								<include>META-INF/LICENSE</include>
+								<include>META-INF/NOTICE</include>
+							</includes>
+						</configuration>
+					</execution>
+
+					<execution>
+						<id>FeatureGramBenchmark</id>
+						<phase>package</phase>
+						<goals>
+							<goal>jar</goal>
+						</goals>
+
+						<configuration>
+							<classifier>FeatureGramBenchmark</classifier>
+
+							<archive>
+								<manifestEntries>
+									<program-class>org.apache.flink.table.examples.java.gpu.FeatureGramBenchmark</program-class>
+								</manifestEntries>
+							</archive>
+
+							<includes>
+								<include>org/apache/flink/table/examples/java/gpu/FeatureGramBenchmark*</include>
 								<include>META-INF/LICENSE</include>
 								<include>META-INF/NOTICE</include>
 							</includes>
