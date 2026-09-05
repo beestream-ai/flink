@@ -18,10 +18,13 @@
 
 package org.apache.flink.table.runtime.gpu;
 
+import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.RowType;
 
 import java.io.Serializable;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * Everything the runtime needs to execute one offloaded Calc, expressed without reference to
@@ -91,6 +94,36 @@ public final class GpuCalcSpec implements Serializable {
     /** Estimated weighted work per row, carried through so the runtime can report it. */
     public int rowCost() {
         return rowCost;
+    }
+
+    /**
+     * Whether the output row can be staged: the kernel writes a {@code DOUBLE}, and every
+     * pass-through column is held host-side in a primitive array of a type that buffer supports.
+     *
+     * <p>This lives on the spec rather than in a provider because it depends on nothing but the
+     * spec. Both sides need the same answer: the planner asks so that a node it cannot serve is
+     * reported as CPU in {@code EXPLAIN} rather than looking offloaded until the job runs, and the
+     * provider asks so that a spec built by some other planner is refused rather than failing
+     * inside the operator.
+     */
+    public boolean canStage() {
+        List<LogicalType> fields = outputType.getChildren();
+        if (fields.size() != outputLayout.length) {
+            return false;
+        }
+        for (int i = 0; i < outputLayout.length; i++) {
+            LogicalTypeRoot root = fields.get(i).getTypeRoot();
+            if (outputLayout[i] == COMPUTED) {
+                if (root != LogicalTypeRoot.DOUBLE) {
+                    return false;
+                }
+            } else if (root != LogicalTypeRoot.BIGINT
+                    && root != LogicalTypeRoot.INTEGER
+                    && root != LogicalTypeRoot.DOUBLE) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override

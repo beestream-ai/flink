@@ -82,20 +82,21 @@ class GpuOffloadExplainIT {
     }
 
     @Test
-    @DisplayName("EXPLAIN reports what happened, not merely what the gate wanted")
-    void selectionThatFellBackIsExplained() {
+    @DisplayName("a selected node reports GPU even where the client has no device")
+    void selectionIsReportedIndependentlyOfTheClient() {
         tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
         String plan = tEnv.explainSql(HEAVY);
 
         assertTrue(plan.contains("== GPU Offload =="), plan);
         assertTrue(plan.contains("subtree 0"), plan);
-        // explainSql translates as well as plans, so the substitution attempt has already run by
-        // the time the section is rendered. With no provider installed the node was selected by the
-        // gate and then fell back, and the section says exactly that rather than claiming a GPU
-        // execution that did not happen. This assertion flips to "clears floor"/GPU once a provider
-        // ships in flink-gpu-runtime.
-        assertTrue(plan.contains("selected but fell back"), plan);
-        assertTrue(plan.contains("no GpuOperatorFactoryProvider on the classpath"), plan);
+        // flink-table-planner has no dependency on the GPU runtime, so nothing here can reach a
+        // device -- and that is now irrelevant to the verdict. The section reports the gate's
+        // decision, which is a property of the query; whether a device is present is a property of
+        // whichever TaskManager gets the task, and is settled there. A plan that said CPU because
+        // the *client* had no provider was answering for the wrong machine.
+        assertTrue(plan.contains("GPU  subtree 0"), plan);
+        assertTrue(plan.contains("clears floor"), plan);
+        assertFalse(plan.contains("no GpuOperatorFactoryProvider"), plan);
     }
 
     @Test

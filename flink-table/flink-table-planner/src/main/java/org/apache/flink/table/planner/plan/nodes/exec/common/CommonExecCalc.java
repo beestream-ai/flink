@@ -39,7 +39,7 @@ import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.planner.utils.JavaScalaConversionUtil;
 import org.apache.flink.table.runtime.gpu.GpuCalcSpec;
 import org.apache.flink.table.runtime.gpu.GpuKernelSource;
-import org.apache.flink.table.runtime.gpu.GpuOperatorFactoryProvider;
+import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
 import org.apache.flink.table.runtime.operators.CodeGenOperatorFactory;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
@@ -104,18 +104,6 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
                 new CodeGeneratorContext(config, planner.getFlinkContext().getClassLoader())
                         .setOperatorBaseClass(operatorBaseClass);
 
-        final StreamOperatorFactory<RowData> gpuOperator =
-                tryGpuOffload(planner, (RowType) getOutputType());
-        if (gpuOperator != null) {
-            return ExecNodeUtil.createOneInputTransformation(
-                    inputTransform,
-                    createTransformationMeta(CALC_TRANSFORMATION, config),
-                    gpuOperator,
-                    InternalTypeInfo.of(getOutputType()),
-                    inputTransform.getParallelism(),
-                    false);
-        }
-
         final CodeGenOperatorFactory<RowData> substituteStreamOperator =
                 CalcCodeGenerator.generateCalcOperator(
                         ctx,
@@ -128,40 +116,39 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
         return ExecNodeUtil.createOneInputTransformation(
                 inputTransform,
                 createTransformationMeta(CALC_TRANSFORMATION, config),
-                substituteStreamOperator,
+                wrapForGpuOffload(planner, (RowType) getOutputType(), substituteStreamOperator),
                 InternalTypeInfo.of(getOutputType()),
                 inputTransform.getParallelism(),
                 false);
     }
 
     /**
-     * Returns a GPU operator factory for this node, or null to fall through to code generation.
+     * Wraps the code-generated operator so the TaskManager can run this Calc on a device, or
+     * returns it unchanged when this node will never offload.
      *
-     * <p>Three independent things must hold, and any of them failing is a normal outcome rather
-     * than an error: the offload processor must have selected this node, a provider must be on the
-     * classpath, and the runtime's kernel catalogue must have a match for the expressions (clearing
-     * the cost floor says an expression is worth offloading, not that a kernel exists for it).
+     * <p>Two things are decided here, and both are properties of the query rather than of any
+     * machine: whether the offload processor selected this node, and whether its expressions can be
+     * generated as a kernel at all. Either failing is a normal outcome, recorded so that EXPLAIN
+     * reports it.
      *
-     * <p>Every fallback path is silent to the query but visible in EXPLAIN, so a plan that was
-     * expected to offload and did not can be diagnosed without attaching a debugger.
+     * <p>What is <em>not</em> decided here is whether a device exists. The planner runs in the
+     * client, and the task will run wherever the scheduler puts it; asking the client's classpath
+     * about the cluster's hardware was the bug this shape removes. Both implementations therefore
+     * travel in the JobGraph and {@link GpuOrCpuCalcOperatorFactory} chooses on arrival.
      */
-    private @Nullable StreamOperatorFactory<RowData> tryGpuOffload(
-            PlannerBase planner, RowType outputType) {
+    private StreamOperatorFactory<RowData> wrapForGpuOffload(
+            PlannerBase planner,
+            RowType outputType,
+            CodeGenOperatorFactory<RowData> codeGenerated) {
         GpuOffloadAssignment assignment = getGpuOffloadAssignment();
         if (assignment == null || !assignment.isOffloaded()) {
-            return null;
-        }
-        Optional<GpuOperatorFactoryProvider> provider =
-                GpuOperatorFactoryProvider.find(planner.getFlinkContext().getClassLoader());
-        if (!provider.isPresent()) {
-            recordGpuFallback(assignment, "no GpuOperatorFactoryProvider on the classpath");
-            return null;
+            return codeGenerated;
         }
         Optional<GpuKernelSource> kernel =
                 GpuKernelGenerator.generate(projection, condition, Integer.toString(getId()));
         if (!kernel.isPresent()) {
             recordGpuFallback(assignment, "expressions cannot be generated as a device kernel");
-            return null;
+            return codeGenerated;
         }
         GpuCalcSpec spec =
                 new GpuCalcSpec(
@@ -170,13 +157,11 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
                         outputType,
                         planner.getTableConfig().get(GpuOffloadOptions.BATCH_SIZE),
                         assignment.verdict().rowCost());
-        Optional<StreamOperatorFactory<RowData>> factory =
-                provider.get().createCalcOperatorFactory(spec);
-        if (!factory.isPresent()) {
-            recordGpuFallback(assignment, provider.get().describe() + " declined " + spec);
-            return null;
+        if (!spec.canStage()) {
+            recordGpuFallback(assignment, "output row cannot be staged for a device");
+            return codeGenerated;
         }
-        return factory.get();
+        return new GpuOrCpuCalcOperatorFactory(spec, codeGenerated);
     }
 
     /** Rewrites the node's verdict so EXPLAIN reports why a selected node still ran on the CPU. */

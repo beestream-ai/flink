@@ -24,10 +24,7 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.gpu.operator.GpuCalcOperator;
 import org.apache.flink.table.runtime.gpu.GpuCalcSpec;
 import org.apache.flink.table.runtime.gpu.GpuOperatorFactoryProvider;
-import org.apache.flink.table.types.logical.LogicalType;
-import org.apache.flink.table.types.logical.LogicalTypeRoot;
 
-import java.util.List;
 import java.util.Optional;
 
 /**
@@ -92,36 +89,11 @@ public class TornadoGpuOperatorFactoryProvider implements GpuOperatorFactoryProv
         if (UNAVAILABLE != null) {
             return Optional.empty();
         }
-        if (!canStageOutput(spec)) {
+        if (!spec.canStage()) {
             return Optional.empty();
         }
         GpuCalcOperator operator = new GpuCalcOperator(spec, spec.batchSize(), PROFILE);
         return Optional.of(SimpleOperatorFactory.of(operator));
-    }
-
-    /**
-     * The kernel writes a DOUBLE, and every other output column is staged host-side in a primitive
-     * array. A type outside that set is refused here rather than failing later inside the operator.
-     */
-    private static boolean canStageOutput(GpuCalcSpec spec) {
-        List<LogicalType> fields = spec.outputType().getChildren();
-        int[] layout = spec.outputLayout();
-        if (fields.size() != layout.length) {
-            return false;
-        }
-        for (int i = 0; i < layout.length; i++) {
-            LogicalTypeRoot root = fields.get(i).getTypeRoot();
-            if (layout[i] == GpuCalcSpec.COMPUTED) {
-                if (root != LogicalTypeRoot.DOUBLE) {
-                    return false;
-                }
-            } else if (root != LogicalTypeRoot.BIGINT
-                    && root != LogicalTypeRoot.INTEGER
-                    && root != LogicalTypeRoot.DOUBLE) {
-                return false;
-            }
-        }
-        return true;
     }
 
     @Override

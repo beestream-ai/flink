@@ -20,45 +20,66 @@ package org.apache.flink.table.planner.plan.gpu;
 
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.types.Row;
+import org.apache.flink.util.CloseableIterator;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The substitution seam: what happens when a node is selected but the runtime cannot serve it.
+ * The substitution seam: what happens when a node is selected but the machine cannot serve it.
  *
  * <p>Whether a given expression can be turned into a kernel is covered by {@link
  * GpuKernelGeneratorTest}. This is about the surrounding fallback, which has to be silent to the
- * query and visible in EXPLAIN.
+ * query and correct in its results.
+ *
+ * <p>flink-table-planner has no dependency on the GPU runtime, so every job here runs on a JVM with
+ * no provider on its classpath — the same position as a TaskManager without a GPU. The plan still
+ * selects the node for offload, because that decision belongs to the query rather than to this
+ * machine, and {@code GpuOrCpuCalcOperatorFactory} falls back when the operator is built. Getting
+ * the right answer out is therefore the assertion that matters.
  */
 class GpuSubstitutionIT {
 
     @Test
-    @DisplayName("with no provider installed, a selected node falls back and EXPLAIN says so")
-    void fallsBackWithoutProvider() {
+    @DisplayName("a node selected for offload still returns correct rows with no provider present")
+    void selectedNodeFallsBackAndComputesCorrectly() throws Exception {
         TableEnvironment tEnv =
                 TableEnvironment.create(EnvironmentSettings.newInstance().inBatchMode().build());
         tEnv.executeSql(
                 "CREATE TABLE t (id BIGINT, val DOUBLE) WITH ("
-                        + "'connector' = 'datagen', 'number-of-rows' = '10')");
+                        + "'connector' = 'datagen', 'number-of-rows' = '200')");
         tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
-        // Floor of 1 so even a trivial expression is selected by the gate, isolating the
-        // provider-absent path from the cost decision.
+        // Floors of 1 so even a trivial expression is selected, isolating the fallback from the
+        // cost decision.
         tEnv.getConfig().set(GpuOffloadOptions.MIN_ROW_COST, 1);
+        tEnv.getConfig().set(GpuOffloadOptions.MIN_TOTAL_WORK, 1L);
 
-        String plan =
-                tEnv.explainSql("SELECT id, val * 2.0 + 1.0 AS scaled FROM t WHERE val > 0.5");
+        String sql = "SELECT id, val, val * 2.0 + 1.0 AS scaled FROM t WHERE val > 0.5";
 
-        // Planning must succeed with no provider present, and the fallback must be reported rather
-        // than swallowed. flink-table-planner has no dependency on the GPU runtime, so this is the
-        // state every build of this module is in.
+        // The plan commits to the device: the gate selected the node and a kernel was generated.
+        String plan = tEnv.explainSql(sql);
         assertTrue(plan.contains("== GPU Offload =="), plan);
-        assertTrue(plan.contains("selected but fell back"), plan);
-        assertTrue(plan.contains("no GpuOperatorFactoryProvider on the classpath"), plan);
-        assertFalse(plan.contains("Exception"), plan);
+        assertTrue(plan.contains("GPU  subtree 0"), plan);
+
+        // And the job runs anyway, on a machine that has no device, returning the same answers the
+        // kernel would have. Before the operator carried both implementations this is the point at
+        // which a mis-placed task died.
+        int rows = 0;
+        try (CloseableIterator<Row> it = tEnv.executeSql(sql).collect()) {
+            while (it.hasNext()) {
+                Row row = it.next();
+                double val = (Double) row.getField(1);
+                double scaled = (Double) row.getField(2);
+                assertTrue(val > 0.5, "filter let through " + val);
+                assertEquals(val * 2.0 + 1.0, scaled, 0.0, "projection is wrong for " + val);
+                rows++;
+            }
+        }
+        assertTrue(rows > 0, "the query returned nothing, so nothing was verified");
     }
 
     @Test

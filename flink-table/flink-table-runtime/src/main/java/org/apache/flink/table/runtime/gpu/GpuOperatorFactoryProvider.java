@@ -33,15 +33,22 @@ import java.util.ServiceLoader;
  * build path of a core Flink module for a feature that is off by default, and would make the fork
  * far harder to argue for upstream.
  *
- * <p>Absence is a supported state, not an error: with the flag on but no provider on the classpath,
- * every node falls back to normal code generation and says so in EXPLAIN. That is also what happens
- * on a cluster where only some TaskManagers have GPUs and the operator jar.
+ * <p>Absence is a supported state, not an error. This is looked up on the TaskManager, by {@link
+ * GpuOrCpuCalcOperatorFactory}, at the moment the operator is built — not in the client during
+ * planning, which would only ever answer for the machine that submitted the job. A node in a
+ * heterogeneous cluster that has no provider runs the code-generated operator the factory carries
+ * alongside the spec, and logs why.
  */
 public interface GpuOperatorFactoryProvider {
 
     /**
      * Builds an operator factory for one offloaded Calc, or empty if this provider cannot serve the
-     * spec — for instance because the device is absent, or the kernel catalogue has no match.
+     * spec — for instance because the device is absent, the JVM is not configured for it, or the
+     * output row cannot be staged.
+     *
+     * <p>Returning empty is a normal answer and the caller falls back to code generation. Throwing
+     * is not: this runs on the TaskManager while the task is starting, and an exception here takes
+     * the job down rather than degrading it.
      */
     Optional<StreamOperatorFactory<RowData>> createCalcOperatorFactory(GpuCalcSpec spec);
 
@@ -51,8 +58,8 @@ public interface GpuOperatorFactoryProvider {
     /**
      * Loads the single provider on the classpath.
      *
-     * <p>Not cached: this runs once per offloaded node during planning, and caching a provider in a
-     * static field would outlive the user classloader that supplied it.
+     * <p>Not cached: this runs once per offloaded subtask when its operator is built, and caching a
+     * provider in a static field would outlive the user classloader that supplied it.
      */
     static Optional<GpuOperatorFactoryProvider> find(ClassLoader classLoader) {
         Iterator<GpuOperatorFactoryProvider> it =
