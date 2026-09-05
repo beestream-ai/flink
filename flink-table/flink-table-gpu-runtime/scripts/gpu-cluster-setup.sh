@@ -112,6 +112,13 @@ fi
 # raise it if you raise the batch size or the slot count.
 OFF_HEAP="${OFF_HEAP:-4g}"
 
+# Total process memory has to cover that budget and everything else the TaskManager needs. The
+# stock 1728m does not: Flink adds the off-heap request to heap, managed and network memory and
+# refuses to start when the sum exceeds the total. start-cluster.sh reports that failure only in
+# the TaskManager's .out file, so the symptom is a cluster with a JobManager and no workers, and a
+# first job that hangs forever waiting for a slot that will never be offered.
+PROCESS_MEM="${PROCESS_MEM:-8g}"
+
 # Flatten the argfile into one line. Comments and blank lines go; everything else is a JVM flag.
 FLAGS=$(TORNADOVM_HOME="${TORNADOVM_HOME}" envsubst < "${TORNADOVM_HOME}/tornado-argfile.template" \
         | grep -vE '^\s*#' | grep -vE '^\s*$' | tr '\n' ' ' | sed 's/  */ /g; s/ $//')
@@ -128,7 +135,7 @@ if [[ ! -f "${PRISTINE}" ]]; then
     cp "${CONFIG}" "${PRISTINE}"
 fi
 
-awk -v flags="${FLAGS}" -v offheap="${OFF_HEAP}" '
+awk -v flags="${FLAGS}" -v offheap="${OFF_HEAP}" -v process="${PROCESS_MEM}" '
     !flagged && /^      all: / { print $0 " " flags; flagged = 1; next }
     # TornadoVM stages through java.lang.foreign, and those allocations are counted against the
     # JVM direct-memory limit. Flink derives that limit from task.off-heap.size, which defaults to
@@ -141,6 +148,9 @@ awk -v flags="${FLAGS}" -v offheap="${OFF_HEAP}" '
     /^taskmanager:/ { in_tm = 1 }
     in_tm && !sized && /^  memory:/ { print "  memory:"; print "    task:"; print "      off-heap:";
                                       print "        size: " offheap; sized = 1; next }
+    # And the total the budget has to fit inside. The JobManager block says 1600m, so this line
+    # matches the TaskManager alone.
+    in_tm && /^      size: 1728m$/ { print "      size: " process; next }
     { print }
 ' "${PRISTINE}" > "${CONFIG}.tmp"
 
@@ -157,5 +167,5 @@ fi
 mv "${CONFIG}.tmp" "${CONFIG}"
 
 echo "wrote TornadoVM flags to ${CONFIG}"
-echo "set taskmanager.memory.task.off-heap.size=${OFF_HEAP}"
+echo "set taskmanager.memory.task.off-heap.size=${OFF_HEAP}, process.size=${PROCESS_MEM}"
 echo "TORNADOVM_HOME=${TORNADOVM_HOME}"
