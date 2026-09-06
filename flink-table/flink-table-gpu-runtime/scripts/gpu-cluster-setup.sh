@@ -71,19 +71,25 @@ fi
 # ships the unshaded planner in opt/ for exactly this swap, and it is built from the reactor.
 LOADER=$(ls "${FLINK_HOME}"/lib/flink-table-planner-loader-*.jar 2>/dev/null | head -1 || true)
 PLANNER=$(ls "${FLINK_HOME}"/opt/flink-table-planner_*.jar 2>/dev/null | head -1 || true)
-if [[ -n "${LOADER}" ]]; then
-    if [[ -z "${PLANNER}" ]]; then
-        echo "no unshaded planner in opt/ to replace the loader with" >&2
+if [[ -z "${PLANNER}" ]]; then
+    if ls "${FLINK_HOME}"/lib/flink-table-planner_*.jar >/dev/null 2>&1; then
+        echo "no planner in opt/; keeping the one already in lib/" >&2
+    else
+        echo "no planner jar in opt/ or lib/" >&2
         exit 1
     fi
-    mv "${LOADER}" "${FLINK_HOME}/opt/"
-    cp "${PLANNER}" "${FLINK_HOME}/lib/"
-    echo "replaced $(basename "${LOADER}") with $(basename "${PLANNER}") in lib/"
-elif ls "${FLINK_HOME}"/lib/flink-table-planner_*.jar >/dev/null 2>&1; then
-    echo "unshaded planner already in lib/"
 else
-    echo "no planner jar in lib/" >&2
-    exit 1
+    if [[ -n "${LOADER}" ]]; then
+        mv "${LOADER}" "${FLINK_HOME}/opt/"
+        echo "moved $(basename "${LOADER}") out of lib/"
+    fi
+    # Unconditionally, every run. This used to happen only on the first, when the loader was still
+    # in lib/ to be displaced; after that the script reported "already in lib/" and left whatever
+    # was there. A rebuilt planner therefore sat in opt/ while the cluster went on running the old
+    # one -- which is the same stale-planner failure the loader swap exists to prevent, arriving by
+    # a different route, and it silently cost a placement measurement.
+    cp "${PLANNER}" "${FLINK_HOME}/lib/"
+    echo "installed $(basename "${PLANNER}") into lib/"
 fi
 
 # Parquet SQL format. flink-sql-parquet is the shaded jar meant for lib/; the unshaded
