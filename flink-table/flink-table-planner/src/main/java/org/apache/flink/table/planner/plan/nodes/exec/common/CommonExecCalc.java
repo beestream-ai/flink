@@ -18,7 +18,9 @@
 
 package org.apache.flink.table.planner.plan.nodes.exec.common;
 
+import org.apache.flink.api.common.operators.SlotSharingGroup;
 import org.apache.flink.api.dag.Transformation;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.table.data.RowData;
@@ -113,13 +115,78 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
                         JavaScalaConversionUtil.toScala(Optional.ofNullable(this.condition)),
                         retainHeader,
                         getClass().getSimpleName());
-        return ExecNodeUtil.createOneInputTransformation(
-                inputTransform,
-                createTransformationMeta(CALC_TRANSFORMATION, config),
-                wrapForGpuOffload(planner, (RowType) getOutputType(), substituteStreamOperator),
-                InternalTypeInfo.of(getOutputType()),
-                inputTransform.getParallelism(),
-                false);
+        final StreamOperatorFactory<RowData> factory =
+                wrapForGpuOffload(planner, (RowType) getOutputType(), substituteStreamOperator);
+        final Transformation<RowData> transform =
+                ExecNodeUtil.createOneInputTransformation(
+                        inputTransform,
+                        createTransformationMeta(CALC_TRANSFORMATION, config),
+                        factory,
+                        InternalTypeInfo.of(getOutputType()),
+                        inputTransform.getParallelism(),
+                        false);
+        // Keyed off the factory that was actually built, not off the offload assignment: a node
+        // can be selected and still fall back, and asking the scheduler for a device to run the
+        // CPU operator on would be worse than not asking at all.
+        if (factory instanceof GpuOrCpuCalcOperatorFactory) {
+            requestDeviceIfConfigured(planner, config, transform);
+        }
+        return transform;
+    }
+
+    /**
+     * Asks the scheduler to place this task where a device is, when the operator has asked for
+     * that.
+     *
+     * <p>This is the half of placement the client legitimately owns. Whether a device is
+     * <em>used</em> is settled on the TaskManager and cannot be known here; whether one is
+     * <em>required</em> is a property of the job the client is submitting, and is exactly what a
+     * slot request expresses.
+     *
+     * <p>Off unless configured, because the failure modes are not symmetric. Without a requirement
+     * a misplaced task runs on the CPU and logs that it did. With one that nothing can satisfy, the
+     * job waits for a slot that will never come -- and Flink has no third option, since a resource
+     * requirement is not a preference.
+     */
+    private void requestDeviceIfConfigured(
+            PlannerBase planner, ExecNodeConfig config, Transformation<RowData> transform) {
+        if (!config.get(GpuOffloadOptions.REQUIRE_DEVICE)) {
+            return;
+        }
+
+        final Double cpuCores = config.getOptional(GpuOffloadOptions.DEVICE_CPU_CORES).orElse(null);
+        final MemorySize taskHeap =
+                config.getOptional(GpuOffloadOptions.DEVICE_TASK_HEAP).orElse(null);
+        if (cpuCores == null || taskHeap == null) {
+            // Fail here rather than let SlotSharingGroup.build() throw: it would report that cpu
+            // and heap are required without saying which of this fork's options asked for them.
+            throw new IllegalArgumentException(
+                    GpuOffloadOptions.REQUIRE_DEVICE.key()
+                            + " needs a whole slot specification, because Flink rejects a slot "
+                            + "sharing group that names an external resource without also naming "
+                            + "cpu cores and task heap. Set "
+                            + GpuOffloadOptions.DEVICE_CPU_CORES.key()
+                            + " and "
+                            + GpuOffloadOptions.DEVICE_TASK_HEAP.key()
+                            + " to values that suit the cluster.");
+        }
+
+        final String groupName = config.get(GpuOffloadOptions.DEVICE_SLOT_SHARING_GROUP);
+        final SlotSharingGroup group =
+                SlotSharingGroup.newBuilder(groupName)
+                        .setCpuCores(cpuCores)
+                        .setTaskHeapMemory(taskHeap)
+                        .setTaskOffHeapMemory(config.get(GpuOffloadOptions.DEVICE_TASK_OFF_HEAP))
+                        .setExternalResource(
+                                config.get(GpuOffloadOptions.DEVICE_RESOURCE_NAME),
+                                config.get(GpuOffloadOptions.DEVICE_RESOURCE_AMOUNT))
+                        .build();
+
+        // Registering carries the resources; setting the group on the transformation is what puts
+        // this operator in it. The default group name is the one every other operator already
+        // uses, so by default this requirement covers the pipelined region and no chain is broken.
+        planner.getExecEnv().registerSlotSharingGroup(group);
+        transform.setSlotSharingGroup(group);
     }
 
     /**
