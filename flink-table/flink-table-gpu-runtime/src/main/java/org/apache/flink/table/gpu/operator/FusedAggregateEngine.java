@@ -63,9 +63,15 @@ import java.util.List;
  *
  * <p>One thread per output column would launch {@code k} threads on a device with thousands of
  * cores, which is the occupancy trap the standalone sweep already fell into. Instead each column is
- * reduced by {@link #PARTIALS} threads striding through the batch, so consecutive threads read
- * consecutive addresses, and the host adds the partials. That last addition is what makes the
- * result independent of how many threads ran.
+ * split into {@link #PARTIALS} contiguous chunks, one thread each, and the host adds the chunk
+ * sums. That last addition is what makes the result independent of how many threads ran.
+ *
+ * <p>The shape is copied from {@code FeatureGramEngine.features}, which works: an {@code int}
+ * parameter as the parallel bound and a plain counted inner loop. The first attempt bounded the
+ * parallel loop by {@code partials.getSize()} and strided by the thread count, and on hardware
+ * exactly one thread ran and summed exactly one element -- the diagnostic reported "1 of 1024
+ * partials non-zero, partial[0]=4752.41" against 262,144 rows staged. Neither loop bound survived,
+ * so the accessor call and the stride are both gone.
  */
 public final class FusedAggregateEngine implements AutoCloseable {
 
@@ -79,6 +85,25 @@ public final class FusedAggregateEngine implements AutoCloseable {
      * though neither agrees bit for bit with the CPU's left-to-right order.
      */
     private static final int PARTIALS = 1024;
+
+    /**
+     * The batch must divide evenly into chunks, so every element is covered exactly once.
+     *
+     * <p>Checked rather than assumed: a batch size that is not a multiple of {@link #PARTIALS}
+     * would drop the remainder of every batch from every sum, which looks like a rounding
+     * difference until someone counts.
+     */
+    private static int chunkSizeFor(int batchSize) {
+        if (batchSize % PARTIALS != 0) {
+            throw new IllegalArgumentException(
+                    "batch size "
+                            + batchSize
+                            + " is not a multiple of "
+                            + PARTIALS
+                            + "; the contraction would drop the remainder of every batch");
+        }
+        return batchSize / PARTIALS;
+    }
 
     private final GpuAggregateSpec spec;
     private final int batchSize;
@@ -184,8 +209,8 @@ public final class FusedAggregateEngine implements AutoCloseable {
                             projected[contracted[i]],
                             mask,
                             partials[i],
-                            batchSize,
-                            PARTIALS);
+                            PARTIALS,
+                            chunkSizeFor(batchSize));
         }
         graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, (Object[]) partials);
         plan = new TornadoExecutionPlan(graph.snapshot());
@@ -200,11 +225,12 @@ public final class FusedAggregateEngine implements AutoCloseable {
      * no saving.
      */
     public static void sumChunks(
-            DoubleArray column, IntArray mask, DoubleArray partials, int rows, int stride) {
-        for (@Parallel int c = 0; c < partials.getSize(); c++) {
+            DoubleArray column, IntArray mask, DoubleArray partials, int chunks, int chunkSize) {
+        for (@Parallel int c = 0; c < chunks; c++) {
             double acc = 0.0;
-            for (int i = c; i < rows; i += stride) {
-                acc += column.get(i) * mask.get(i);
+            int start = c * chunkSize;
+            for (int i = 0; i < chunkSize; i++) {
+                acc += column.get(start + i) * mask.get(start + i);
             }
             partials.set(c, acc);
         }
