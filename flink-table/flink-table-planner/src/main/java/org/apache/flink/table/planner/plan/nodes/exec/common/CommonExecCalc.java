@@ -49,6 +49,8 @@ import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 
 import org.apache.calcite.rex.RexNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
@@ -61,6 +63,8 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 /** Base class for exec Calc. */
 public abstract class CommonExecCalc extends ExecNodeBase<RowData>
         implements SingleTransformationTranslator<RowData> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(CommonExecCalc.class);
 
     public static final String CALC_TRANSFORMATION = "calc";
 
@@ -195,6 +199,17 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
         // uses, so by default this requirement covers the pipelined region and no chain is broken.
         planner.getExecEnv().registerSlotSharingGroup(group);
         transform.setSlotSharingGroup(group);
+        // At INFO in the client, because a plan saying GPU is an intention and this is the one
+        // thing the client can report as fact: that it asked. Whether a device was used is settled
+        // on the TaskManager and reported there.
+        LOG.info(
+                "GPU offload requests a slot declaring {}={} in slot sharing group '{}' "
+                        + "(cpu {}, task heap {})",
+                config.get(GpuOffloadOptions.DEVICE_RESOURCE_NAME),
+                config.get(GpuOffloadOptions.DEVICE_RESOURCE_AMOUNT),
+                groupName,
+                cpuCores,
+                taskHeap);
     }
 
     /**
