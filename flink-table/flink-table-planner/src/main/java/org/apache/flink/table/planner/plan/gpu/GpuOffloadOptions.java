@@ -53,6 +53,14 @@ public class GpuOffloadOptions {
      * <p>So this is opt-in for the operator, and the operator has to have configured the other
      * side: {@code external-resource.list: gpu} and {@code external-resource.gpu.amount} on the
      * TaskManagers that have one.
+     *
+     * <p><b>And {@code jobmanager.scheduler: Default}.</b> The requirement reaches the JobGraph
+     * intact under either scheduler -- the offloaded vertex's slot sharing group carries a {@code
+     * ResourceProfile} naming the resource -- but only the default scheduler declares it.
+     * AdaptiveBatch, which is what a batch job gets unless told otherwise, declares {@code
+     * ResourceProfile{UNKNOWN}} instead, and a TaskManager with no device serves the job happily.
+     * {@code GpuPlacementSchedulerIT} pins both halves of that, so the day it changes is a test
+     * failure rather than a surprise.
      */
     public static final ConfigOption<Boolean> REQUIRE_DEVICE =
             ConfigOptions.key("table.exec.gpu-offload.require-device")
@@ -63,7 +71,10 @@ public class GpuOffloadOptions {
                                     + "declares the external resource named by "
                                     + "table.exec.gpu-offload.device.resource-name. Requires "
                                     + "TaskManagers to declare that resource; if none does, the "
-                                    + "job will wait for a slot rather than fall back to the CPU.");
+                                    + "job will wait for a slot rather than fall back to the CPU. "
+                                    + "Needs jobmanager.scheduler: Default -- the AdaptiveBatch "
+                                    + "scheduler flattens the requirement to UNKNOWN before the "
+                                    + "ResourceManager sees it, so the job runs anywhere.");
 
     /**
      * The slot sharing group the requirement is attached to, which cannot be the default one.
