@@ -98,18 +98,24 @@ public final class FeatureGramBenchmark {
         }
 
         System.out.printf(
-                "data=%s  rows=%,d  cols=%d  parallelism=%s  gpu=%s  runs=%d  batch=%,d%n",
+                "data=%s  rows=%,d  cols=%d  parallelism=%s  gpu=%s  offload=%s  fused=%s  runs=%d  batch=%,d%n",
                 parsed.data,
                 parsed.rows,
                 parsed.cols,
                 parsed.parallelism > 0 ? Integer.toString(parsed.parallelism) : "(default)",
                 parsed.gpu,
+                parsed.offload,
+                parsed.fuseAggregate,
                 parsed.runs,
                 parsed.batch);
 
         double[] first = null;
         for (int run = 1; run <= parsed.runs; run++) {
             long start = System.nanoTime();
+            // Three ways to compute the same matrix. cpuGram is the SQL one, and it is also the
+            // offloaded one: the query it builds -- SUM(fi*fj) over a Calc of SIN(ci) -- is exactly
+            // the shape the planner fuses, so --offload turns the same arm into a device arm
+            // without changing a character of the SQL.
             double[] seen = parsed.gpu ? gpuGram(parsed) : cpuGram(parsed);
             double millis = (System.nanoTime() - start) / 1e6;
             System.out.printf(
@@ -291,7 +297,16 @@ public final class FeatureGramBenchmark {
         if (args.parallelism > 0) {
             env.setParallelism(args.parallelism);
         }
-        return StreamTableEnvironment.create(env);
+        StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+        if (args.offload) {
+            tEnv.getConfig().getConfiguration().setString("table.exec.gpu-offload.enabled", "true");
+            if (!args.fuseAggregate) {
+                tEnv.getConfig()
+                        .getConfiguration()
+                        .setString("table.exec.gpu-offload.fuse-aggregate", "false");
+            }
+        }
+        return tEnv;
     }
 
     /** Sum of the diagonal, a single number that moves if anything about the matrix is wrong. */
@@ -332,6 +347,8 @@ public final class FeatureGramBenchmark {
         private int runs = 6;
         private int batch = 262_144;
         private boolean gpu;
+        private boolean offload;
+        private boolean fuseAggregate = true;
         private boolean generate;
 
         static Args parse(String[] argv) {
@@ -350,6 +367,10 @@ public final class FeatureGramBenchmark {
                     args.runs = Integer.parseInt(argv[++i]);
                 } else if ("--batch".equals(flag)) {
                     args.batch = Integer.parseInt(argv[++i]);
+                } else if ("--offload".equals(flag)) {
+                    args.offload = Boolean.parseBoolean(argv[++i]);
+                } else if ("--fuse-aggregate".equals(flag)) {
+                    args.fuseAggregate = Boolean.parseBoolean(argv[++i]);
                 } else if ("--gpu".equals(flag)) {
                     args.gpu = Boolean.parseBoolean(argv[++i]);
                 } else if ("--generate".equals(flag)) {
