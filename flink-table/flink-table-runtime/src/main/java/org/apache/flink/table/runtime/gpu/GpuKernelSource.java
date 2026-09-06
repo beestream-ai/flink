@@ -41,6 +41,8 @@ public final class GpuKernelSource implements Serializable {
     private final String methodName;
     private final String source;
     private final int[] inputFieldIndexes;
+    private final GpuValueType[] inputTypes;
+    private final GpuValueType[] outputTypes;
     private final int outputCount;
     private final boolean hasFilter;
     private final int[] outputLayout;
@@ -50,14 +52,25 @@ public final class GpuKernelSource implements Serializable {
             String methodName,
             String source,
             int[] inputFieldIndexes,
-            int outputCount,
+            GpuValueType[] inputTypes,
+            GpuValueType[] outputTypes,
             boolean hasFilter,
             int[] outputLayout) {
+        if (inputFieldIndexes.length != inputTypes.length) {
+            throw new IllegalArgumentException(
+                    "every staged column needs a declared type: "
+                            + inputFieldIndexes.length
+                            + " columns against "
+                            + inputTypes.length
+                            + " types");
+        }
         this.className = className;
         this.methodName = methodName;
         this.source = source;
         this.inputFieldIndexes = inputFieldIndexes;
-        this.outputCount = outputCount;
+        this.inputTypes = inputTypes;
+        this.outputTypes = outputTypes;
+        this.outputCount = outputTypes.length;
         this.hasFilter = hasFilter;
         this.outputLayout = outputLayout;
     }
@@ -82,6 +95,26 @@ public final class GpuKernelSource implements Serializable {
      */
     public int[] inputFieldIndexes() {
         return inputFieldIndexes;
+    }
+
+    /**
+     * Width each staged input column is held at, parallel to {@link #inputFieldIndexes()}.
+     *
+     * <p>Both the buffer the runtime allocates and the accessor the gather reads with come from
+     * here; they have to agree, and reading a column at the wrong width does not fail loudly.
+     */
+    public GpuValueType[] inputTypes() {
+        return inputTypes;
+    }
+
+    /**
+     * Width each computed output column is written at.
+     *
+     * <p>Only {@link GpuValueType#FLOAT} and {@link GpuValueType#DOUBLE} occur: the generator
+     * refuses an expression whose result is not one of those.
+     */
+    public GpuValueType[] outputTypes() {
+        return outputTypes;
     }
 
     /** Number of computed output columns the kernel writes. */
@@ -110,8 +143,9 @@ public final class GpuKernelSource implements Serializable {
                 + className
                 + ", inputs="
                 + Arrays.toString(inputFieldIndexes)
+                + Arrays.toString(inputTypes)
                 + ", outputs="
-                + outputCount
+                + Arrays.toString(outputTypes)
                 + (hasFilter ? ", filtered" : "")
                 + "]";
     }

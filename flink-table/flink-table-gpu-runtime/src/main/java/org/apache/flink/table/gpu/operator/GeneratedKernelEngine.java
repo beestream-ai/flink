@@ -18,9 +18,11 @@
 
 package org.apache.flink.table.gpu.operator;
 
+import org.apache.flink.table.gpu.gather.RowGather;
 import org.apache.flink.table.gpu.metrics.OffloadMetrics;
 import org.apache.flink.table.runtime.gpu.GpuCalcSpec;
 import org.apache.flink.table.runtime.gpu.GpuKernelSource;
+import org.apache.flink.table.runtime.gpu.GpuValueType;
 
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
@@ -29,6 +31,7 @@ import uk.ac.manchester.tornado.api.TornadoProfilerResult;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.enums.ProfilerMode;
 import uk.ac.manchester.tornado.api.types.arrays.DoubleArray;
+import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
 import javax.tools.JavaCompiler;
@@ -73,8 +76,15 @@ public final class GeneratedKernelEngine implements AutoCloseable {
     private final GpuCalcSpec spec;
     private final boolean profile;
 
-    private DoubleArray[] inputs;
-    private DoubleArray[] outputs;
+    /**
+     * Staging buffers, one per column, each a {@code DoubleArray}, {@code FloatArray} or {@code
+     * IntArray} according to the column's declared type. Held as {@code Object} because TornadoVM's
+     * array classes share no interface that exposes {@code set}; every access goes through the
+     * per-column accessors below, which know the concrete type.
+     */
+    private Object[] inputs;
+
+    private Object[] outputs;
     private IntArray mask;
     private Path workDir;
     private URLClassLoader loader;
@@ -91,18 +101,13 @@ public final class GeneratedKernelEngine implements AutoCloseable {
         final GpuKernelSource kernel = spec.kernel();
         final int batchSize = spec.batchSize();
 
-        inputs = new DoubleArray[kernel.inputFieldIndexes().length];
+        inputs = new Object[kernel.inputFieldIndexes().length];
         for (int i = 0; i < inputs.length; i++) {
-            inputs[i] = new DoubleArray(batchSize);
-            // TornadoVM's native arrays hold garbage on allocation, unlike Java arrays. The tail of
-            // a partial batch is never read, but leaving it undefined would make device results
-            // differ between runs.
-            inputs[i].init(0.0);
+            inputs[i] = allocate(kernel.inputTypes()[i], batchSize);
         }
-        outputs = new DoubleArray[kernel.outputCount()];
+        outputs = new Object[kernel.outputCount()];
         for (int i = 0; i < outputs.length; i++) {
-            outputs[i] = new DoubleArray(batchSize);
-            outputs[i].init(0.0);
+            outputs[i] = allocate(kernel.outputTypes()[i], batchSize);
         }
         if (kernel.hasFilter()) {
             mask = new IntArray(batchSize);
@@ -113,10 +118,10 @@ public final class GeneratedKernelEngine implements AutoCloseable {
 
         Object[] args = new Object[inputs.length + outputs.length + (mask == null ? 0 : 1)];
         int at = 0;
-        for (DoubleArray in : inputs) {
+        for (Object in : inputs) {
             args[at++] = in;
         }
-        for (DoubleArray out : outputs) {
+        for (Object out : outputs) {
             args[at++] = out;
         }
         if (mask != null) {
@@ -124,14 +129,14 @@ public final class GeneratedKernelEngine implements AutoCloseable {
         }
 
         TaskGraph graph = new TaskGraph("calc");
-        graph = graph.transferToDevice(DataTransferMode.EVERY_EXECUTION, (Object[]) inputs);
+        graph = graph.transferToDevice(DataTransferMode.EVERY_EXECUTION, inputs);
         // Naming the kernel by Method rather than by a method reference is what makes a generated
         // kernel possible at all: a method reference would have to exist in source.
         graph = graph.task("kernel", entry, args);
         Object[] results =
                 mask == null
                         ? outputs
-                        : Stream.concat(Arrays.stream(outputs), Stream.of(mask)).toArray();
+                        : Stream.concat(Arrays.stream(outputs), Stream.<Object>of(mask)).toArray();
         graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, results);
 
         plan = new TornadoExecutionPlan(graph.snapshot());
@@ -218,6 +223,7 @@ public final class GeneratedKernelEngine implements AutoCloseable {
                     uk.ac.manchester.tornado.api.annotations.Parallel.class,
                     uk.ac.manchester.tornado.api.math.TornadoMath.class,
                     DoubleArray.class,
+                    FloatArray.class,
                     IntArray.class
                 }) {
             String location = codeSourceOf(referenced);
@@ -242,17 +248,67 @@ public final class GeneratedKernelEngine implements AutoCloseable {
     }
 
     /** Write side of one staged input column. */
-    public void setInput(int column, int position, double value) {
-        inputs[column].set(position, value);
+    /**
+     * A newly allocated staging buffer of the given width.
+     *
+     * <p>TornadoVM's native arrays hold garbage on allocation, unlike Java arrays. The tail of a
+     * partial batch is never read, but leaving it undefined would make device results differ
+     * between runs.
+     */
+    private static Object allocate(GpuValueType type, int batchSize) {
+        switch (type) {
+            case INT:
+                IntArray ints = new IntArray(batchSize);
+                ints.init(0);
+                return ints;
+            case FLOAT:
+                FloatArray floats = new FloatArray(batchSize);
+                floats.init(0.0f);
+                return floats;
+            default:
+                DoubleArray doubles = new DoubleArray(batchSize);
+                doubles.init(0.0);
+                return doubles;
+        }
+    }
+
+    /**
+     * The write side of one staged column, bound once to its concrete buffer.
+     *
+     * <p>Returned rather than exposed as a {@code setInput(column, ...)} method so the narrowing
+     * happens against a buffer the lambda already holds, instead of switching on the column's type
+     * once per value.
+     */
+    public RowGather.StagingColumn inputColumn(int column) {
+        Object buffer = inputs[column];
+        if (buffer instanceof IntArray ints) {
+            return (position, value) -> ints.set(position, (int) value);
+        }
+        if (buffer instanceof FloatArray floats) {
+            return (position, value) -> floats.set(position, (float) value);
+        }
+        DoubleArray doubles = (DoubleArray) buffer;
+        return doubles::set;
     }
 
     /** Off-heap buffer for one staged input column, for gathers that can bulk-copy into it. */
     public java.lang.foreign.MemorySegment inputSegment(int column) {
-        return inputs[column].getSegment();
+        Object buffer = inputs[column];
+        return buffer instanceof DoubleArray doubles ? doubles.getSegment() : null;
     }
 
-    public double output(int column, int position) {
-        return outputs[column].get(position);
+    /**
+     * One computed value, boxed as the row type declares it.
+     *
+     * <p>A {@code FLOAT} output has to arrive downstream as a {@link Float}: the field is written
+     * into a {@link org.apache.flink.table.data.GenericRowData}, whose serializer reads it back at
+     * the declared type and does not convert.
+     */
+    public Object output(int column, int position) {
+        Object buffer = outputs[column];
+        return buffer instanceof FloatArray floats
+                ? (Object) floats.get(position)
+                : (Object) ((DoubleArray) buffer).get(position);
     }
 
     public boolean selected(int position) {

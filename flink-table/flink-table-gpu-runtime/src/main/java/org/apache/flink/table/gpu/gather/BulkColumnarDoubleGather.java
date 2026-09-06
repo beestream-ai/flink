@@ -90,14 +90,14 @@ public final class BulkColumnarDoubleGather implements RowGather {
     }
 
     private final int field;
-    private final RowGather.DoubleColumn target;
+    private final RowGather.StagingColumn target;
     private final MemorySegment targetSegment;
 
     private long bulkRows;
     private long perRowRows;
 
     public BulkColumnarDoubleGather(
-            int field, RowGather.DoubleColumn target, MemorySegment targetSegment) {
+            int field, RowGather.StagingColumn target, MemorySegment targetSegment) {
         this.field = field;
         this.target = target;
         this.targetSegment = targetSegment;

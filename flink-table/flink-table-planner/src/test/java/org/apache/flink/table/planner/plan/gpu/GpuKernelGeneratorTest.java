@@ -19,6 +19,7 @@
 package org.apache.flink.table.planner.plan.gpu;
 
 import org.apache.flink.table.runtime.gpu.GpuKernelSource;
+import org.apache.flink.table.runtime.gpu.GpuValueType;
 
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
@@ -69,6 +70,10 @@ class GpuKernelGeneratorTest {
 
     private RexNode col(int index) {
         return rex.makeInputRef(types.createSqlType(SqlTypeName.DOUBLE), index);
+    }
+
+    private RexNode col(int index, SqlTypeName type) {
+        return rex.makeInputRef(types.createSqlType(type), index);
     }
 
     private RexNode lit(double v) {
@@ -240,5 +245,68 @@ class GpuKernelGeneratorTest {
             at = text.indexOf(needle, at + 1);
         }
         return count;
+    }
+
+    @Test
+    @DisplayName("a column is staged at its declared width, not widened to a double")
+    void stagesColumnsAtTheirDeclaredWidth() {
+        RexNode sum =
+                rex.makeCall(
+                        SqlStdOperatorTable.PLUS,
+                        rex.makeCall(
+                                SqlStdOperatorTable.PLUS,
+                                col(0, SqlTypeName.INTEGER),
+                                col(1, SqlTypeName.FLOAT)),
+                        col(2, SqlTypeName.DOUBLE));
+        GpuKernelSource kernel = generate(Collections.singletonList(sum), null);
+
+        assertArrayEquals(
+                new GpuValueType[] {GpuValueType.INT, GpuValueType.FLOAT, GpuValueType.DOUBLE},
+                kernel.inputTypes());
+        assertTrue(kernel.source().contains("IntArray c0_in"), kernel.source());
+        assertTrue(kernel.source().contains("FloatArray c1_in"), kernel.source());
+        assertTrue(kernel.source().contains("DoubleArray c2_in"), kernel.source());
+        // Only the buffers are typed: the arithmetic still happens in double, exactly as it did
+        // when every column was staged as one.
+        assertTrue(kernel.source().contains("double c0 = c0_in.get(i);"), kernel.source());
+        assertTrue(kernel.source().contains("double c1 = c1_in.get(i);"), kernel.source());
+    }
+
+    @Test
+    @DisplayName("a FLOAT result is narrowed in the kernel, so the row gets a Float")
+    void narrowsAFloatResultOnTheDevice() {
+        RexNode sum =
+                rex.makeCall(
+                        SqlStdOperatorTable.PLUS,
+                        col(0, SqlTypeName.FLOAT),
+                        col(1, SqlTypeName.FLOAT));
+        GpuKernelSource kernel = generate(Collections.singletonList(sum), null);
+
+        assertArrayEquals(new GpuValueType[] {GpuValueType.FLOAT}, kernel.outputTypes());
+        assertTrue(kernel.source().contains("FloatArray out0"), kernel.source());
+        assertTrue(kernel.source().contains("out0.set(i, (float) ("), kernel.source());
+    }
+
+    @Test
+    @DisplayName("a DOUBLE result is written straight through")
+    void writesADoubleResultUnnarrowed() {
+        RexNode sum = rex.makeCall(SqlStdOperatorTable.PLUS, col(0), col(1));
+        GpuKernelSource kernel = generate(Collections.singletonList(sum), null);
+
+        assertArrayEquals(new GpuValueType[] {GpuValueType.DOUBLE}, kernel.outputTypes());
+        assertTrue(kernel.source().contains("DoubleArray out0"), kernel.source());
+        assertFalse(kernel.source().contains("(float)"), kernel.source());
+    }
+
+    @Test
+    @DisplayName("the generated source imports only the array classes it uses")
+    void importsOnlyTheArrayClassesItUses() {
+        RexNode sum = rex.makeCall(SqlStdOperatorTable.PLUS, col(0), col(1));
+        String source = generate(Collections.singletonList(sum), null).source();
+
+        assertTrue(
+                source.contains("import uk.ac.manchester.tornado.api.types.arrays.DoubleArray;"));
+        assertFalse(source.contains("FloatArray;"), source);
+        assertFalse(source.contains("IntArray;"), source);
     }
 }

@@ -19,33 +19,45 @@
 package org.apache.flink.table.gpu.gather;
 
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.data.binary.BinaryRowData;
+import org.apache.flink.table.runtime.gpu.GpuValueType;
 
 /**
- * Tier 4 — the fallback. Reads through the {@link RowData} interface, which for {@code
- * GenericRowData} and {@code BoxedWrapperRowData} means an object dereference plus an unbox per
- * field.
+ * Typed access rather than the {@link RowData} interface: identical result, one less virtual call.
  *
- * <p>Correct for every implementation, and expected to be the slowest by a wide margin. It exists
- * so the operator is never wrong, not because it is expected to pay: the planner-side predicate
- * should reject inputs known to land here (chained after another Calc is knowable at plan time).
+ * <p>The accessor is chosen by the column's declared type. Reading a four-byte field with {@code
+ * getDouble} does not fail, it returns eight bytes of whatever is there, so this switch is the
+ * difference between a value and garbage.
  */
-final class GenericDoubleGather implements RowGather {
+final class BinaryGather implements RowGather {
 
     private final int field;
-    private final DoubleColumn target;
+    private final GpuValueType type;
+    private final StagingColumn target;
 
-    GenericDoubleGather(int field, DoubleColumn target) {
+    BinaryGather(int field, GpuValueType type, StagingColumn target) {
         this.field = field;
+        this.type = type;
         this.target = target;
     }
 
     @Override
     public void accept(RowData row, int position) {
-        target.set(position, row.getDouble(field));
+        switch (type) {
+            case INT:
+                target.set(position, ((BinaryRowData) row).getInt(field));
+                break;
+            case FLOAT:
+                target.set(position, ((BinaryRowData) row).getFloat(field));
+                break;
+            default:
+                target.set(position, ((BinaryRowData) row).getDouble(field));
+                break;
+        }
     }
 
     @Override
     public String tier() {
-        return "tier4-generic";
+        return "tier2-binary";
     }
 }

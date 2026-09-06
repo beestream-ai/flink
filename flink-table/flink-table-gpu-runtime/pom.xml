@@ -41,6 +41,13 @@ under the License.
 	</description>
 
 	<properties>
+		<!--
+			Classes here carry the preview-feature bit, so the test JVM has to admit it too; without
+			this every test dies on UnsupportedClassVersionError before reaching an assertion. The
+			parent sets argLine inside each surefire execution, which beats plugin-level configuration,
+			so the property both executions interpolate is the one to extend.
+		-->
+		<flink.surefire.baseArgLine>-XX:+UseG1GC -Xms256m -XX:+IgnoreUnrecognizedVMOptions --enable-preview ${surefire.module.config}</flink.surefire.baseArgLine>
 		<tornado.version>6.0.1-jdk21-dev</tornado.version>
 	</properties>
 

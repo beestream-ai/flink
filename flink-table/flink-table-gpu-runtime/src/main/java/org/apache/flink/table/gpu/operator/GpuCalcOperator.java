@@ -27,6 +27,7 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.gpu.gather.RowGather;
 import org.apache.flink.table.gpu.metrics.OffloadMetrics;
 import org.apache.flink.table.runtime.gpu.GpuCalcSpec;
+import org.apache.flink.table.runtime.gpu.GpuValueType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 
@@ -101,13 +102,14 @@ public class GpuCalcOperator extends AbstractStreamOperator<RowData>
             // declares only InternalTypeInfo<RowData> and the connector picks the class -- so the
             // gather strategy is chosen from the first record actually seen.
             int[] fields = spec.kernel().inputFieldIndexes();
+            GpuValueType[] types = spec.kernel().inputTypes();
             for (int c = 0; c < fields.length; c++) {
-                final int column = c;
                 gathers[c] =
-                        RowGather.forDouble(
+                        RowGather.forColumn(
                                 row,
                                 fields[c],
-                                (position, value) -> engine.setInput(column, position, value),
+                                types[c],
+                                engine.inputColumn(c),
                                 engine.inputSegment(c));
             }
         }

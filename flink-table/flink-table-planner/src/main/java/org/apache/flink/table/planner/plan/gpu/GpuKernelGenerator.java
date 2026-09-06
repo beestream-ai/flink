@@ -19,6 +19,7 @@
 package org.apache.flink.table.planner.plan.gpu;
 
 import org.apache.flink.table.runtime.gpu.GpuKernelSource;
+import org.apache.flink.table.runtime.gpu.GpuValueType;
 
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
@@ -38,6 +39,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Generates a TornadoVM kernel, as Java source, from a Calc's {@code RexNode} expressions.
@@ -47,12 +49,22 @@ import java.util.Set;
  * method that already existed at compile time, which forced a fixed catalogue of shapes; this
  * removes that limit.
  *
- * <h2>Everything is a double on the device</h2>
+ * <h2>Storage follows the column, arithmetic does not</h2>
  *
- * <p>Inputs to the expression are staged as {@code DoubleArray} and results are written as doubles.
- * That is exact for the input types admitted here — {@code INTEGER} and {@code FLOAT} are both
- * representable in a double without loss — and it keeps one buffer type rather than a matrix of
- * kernel signatures.
+ * <p>Each staged column is held at its declared width — {@code IntArray}, {@code FloatArray} or
+ * {@code DoubleArray} — and widened to {@code double} on entry to the loop body, so the expression
+ * is evaluated in double whatever it reads. Only the buffer and the transfer follow the column.
+ *
+ * <p>This used to stage everything as {@code DoubleArray}, justified by {@code INTEGER} and {@code
+ * FLOAT} both being exact in a double. They are; the argument was still wrong, because it was about
+ * values and the gather is about layout. Reading a four-byte field with {@code getDouble} reads
+ * eight bytes: an {@code INT} column holding 42 reached the device as 2.08e-322. A {@code FLOAT}
+ * result had the mirror-image problem on the way out, boxing a {@code Double} into a field the row
+ * type declares {@code FLOAT}.
+ *
+ * <p>The width is also worth having on its own: a {@code FLOAT} or {@code INT} column now moves
+ * four bytes per row instead of eight, and every workload measured so far is bound by moving its
+ * input.
  *
  * <p><b>{@code BIGINT} is deliberately excluded as an expression input.</b> Values beyond 2^53 do
  * not survive the round trip through a double, so admitting it would silently return different
@@ -120,7 +132,10 @@ public final class GpuKernelGenerator {
 
         // Only referenced columns are staged; a projected-through column stays on the host.
         final Map<Integer, String> inputs = new LinkedHashMap<>();
+        // Filled by render() as columns are registered, so it stays in step with inputs.
+        final Map<Integer, GpuValueType> inputTypes = new LinkedHashMap<>();
         final List<String> computed = new ArrayList<>();
+        final List<GpuValueType> outputTypes = new ArrayList<>();
         final int[] layout = new int[projection.size()];
 
         for (int field = 0; field < projection.size(); field++) {
@@ -133,11 +148,12 @@ public final class GpuKernelGenerator {
             if (!isDoubleResult(expr)) {
                 return Optional.empty();
             }
-            String rendered = render(expr, inputs);
+            String rendered = render(expr, inputs, inputTypes);
             if (rendered == null) {
                 return Optional.empty();
             }
             computed.add(rendered);
+            outputTypes.add(valueTypeOf(expr.getType().getSqlTypeName()));
         }
         if (computed.isEmpty()) {
             // Nothing to compute; the CPU path already handles pure projection.
@@ -146,7 +162,7 @@ public final class GpuKernelGenerator {
 
         String renderedCondition = null;
         if (condition != null) {
-            renderedCondition = render(condition, inputs);
+            renderedCondition = render(condition, inputs, inputTypes);
             if (renderedCondition == null) {
                 return Optional.empty();
             }
@@ -164,14 +180,27 @@ public final class GpuKernelGenerator {
         }
 
         int[] inputFields = inputs.keySet().stream().mapToInt(Integer::intValue).toArray();
-        String source = renderClass(className, methodName, inputs, computed, renderedCondition);
+        GpuValueType[] stagedTypes = new GpuValueType[inputFields.length];
+        for (int i = 0; i < inputFields.length; i++) {
+            stagedTypes[i] = inputTypes.get(inputFields[i]);
+        }
+        String source =
+                renderClass(
+                        className,
+                        methodName,
+                        inputs,
+                        inputTypes,
+                        computed,
+                        outputTypes,
+                        renderedCondition);
         return Optional.of(
                 new GpuKernelSource(
                         className,
                         methodName,
                         source,
                         inputFields,
-                        computed.size(),
+                        stagedTypes,
+                        outputTypes.toArray(new GpuValueType[0]),
                         renderedCondition != null,
                         layout));
     }
@@ -180,23 +209,43 @@ public final class GpuKernelGenerator {
             String className,
             String methodName,
             Map<Integer, String> inputs,
+            Map<Integer, GpuValueType> inputTypes,
             List<String> computed,
+            List<GpuValueType> outputTypes,
             @Nullable String condition) {
+
+        // Only the array classes this kernel actually mentions, so the generated source names
+        // nothing it does not use. IntArray is separate: a filter needs it for the mask whether or
+        // not any column is an integer.
+        Set<String> arrayTypes = new TreeSet<>();
+        for (GpuValueType type : inputTypes.values()) {
+            arrayTypes.add(type.arrayType());
+        }
+        for (GpuValueType type : outputTypes) {
+            arrayTypes.add(type.arrayType());
+        }
+        if (condition != null) {
+            arrayTypes.add(GpuValueType.INT.arrayType());
+        }
 
         StringBuilder sb = new StringBuilder();
         sb.append("import uk.ac.manchester.tornado.api.annotations.Parallel;\n");
         sb.append("import uk.ac.manchester.tornado.api.math.TornadoMath;\n");
-        sb.append("import uk.ac.manchester.tornado.api.types.arrays.DoubleArray;\n");
-        sb.append("import uk.ac.manchester.tornado.api.types.arrays.IntArray;\n\n");
+        for (String arrayType : arrayTypes) {
+            sb.append("import uk.ac.manchester.tornado.api.types.arrays.")
+                    .append(arrayType)
+                    .append(";\n");
+        }
+        sb.append("\n");
         sb.append("public final class ").append(className).append(" {\n\n");
         sb.append("    public static void ").append(methodName).append("(");
 
         List<String> params = new ArrayList<>();
-        for (String var : inputs.values()) {
-            params.add("DoubleArray " + var + "_in");
+        for (Map.Entry<Integer, String> input : inputs.entrySet()) {
+            params.add(inputTypes.get(input.getKey()).arrayType() + " " + input.getValue() + "_in");
         }
         for (int i = 0; i < computed.size(); i++) {
-            params.add("DoubleArray out" + i);
+            params.add(outputTypes.get(i).arrayType() + " out" + i);
         }
         if (condition != null) {
             params.add("IntArray mask");
@@ -207,6 +256,8 @@ public final class GpuKernelGenerator {
         sb.append("        for (@Parallel int i = 0; i < ")
                 .append(first)
                 .append("_in.getSize(); i++) {\n");
+        // Widened to double on read, so the expression below is evaluated exactly as it was when
+        // every column was staged as a double. Only the buffer changed.
         for (String var : inputs.values()) {
             sb.append(INDENT)
                     .append("    double ")
@@ -216,11 +267,16 @@ public final class GpuKernelGenerator {
                     .append("_in.get(i);\n");
         }
         for (int i = 0; i < computed.size(); i++) {
+            // A FLOAT result is narrowed here rather than on the host, so the value that crosses
+            // the bus is the one the row type declares and the buffer is half the size.
+            boolean narrow = outputTypes.get(i) == GpuValueType.FLOAT;
             sb.append(INDENT)
                     .append("    out")
                     .append(i)
                     .append(".set(i, ")
+                    .append(narrow ? "(float) (" : "")
                     .append(computed.get(i))
+                    .append(narrow ? ")" : "")
                     .append(");\n");
         }
         if (condition != null) {
@@ -239,12 +295,15 @@ public final class GpuKernelGenerator {
     }
 
     /** Renders one expression, registering any column it reads. Null if it cannot be expressed. */
-    private static @Nullable String render(RexNode node, Map<Integer, String> inputs) {
+    private static @Nullable String render(
+            RexNode node, Map<Integer, String> inputs, Map<Integer, GpuValueType> inputTypes) {
         if (node instanceof RexInputRef) {
             RexInputRef ref = (RexInputRef) node;
-            if (!isDoubleSafeInput(ref.getType().getSqlTypeName())) {
+            SqlTypeName sqlType = ref.getType().getSqlTypeName();
+            if (!isDoubleSafeInput(sqlType)) {
                 return null;
             }
+            inputTypes.putIfAbsent(ref.getIndex(), valueTypeOf(sqlType));
             return inputs.computeIfAbsent(ref.getIndex(), index -> "c" + index);
         }
         if (node instanceof RexLiteral) {
@@ -256,7 +315,7 @@ public final class GpuKernelGenerator {
         RexCall call = (RexCall) node;
         List<String> operands = new ArrayList<>();
         for (RexNode operand : call.getOperands()) {
-            String rendered = render(operand, inputs);
+            String rendered = render(operand, inputs, inputTypes);
             if (rendered == null) {
                 return null;
             }
@@ -424,6 +483,26 @@ public final class GpuKernelGenerator {
      *
      * <p>{@code BIGINT} is absent on purpose; see the class comment.
      */
+    /**
+     * The width a column of this type is staged at.
+     *
+     * <p>Only called for types {@link #isDoubleSafeInput} or {@link #isDoubleResult} has already
+     * admitted, so the fall-through is unreachable rather than a default.
+     */
+    private static GpuValueType valueTypeOf(SqlTypeName type) {
+        switch (type) {
+            case INTEGER:
+                return GpuValueType.INT;
+            case FLOAT:
+            case REAL:
+                return GpuValueType.FLOAT;
+            case DOUBLE:
+                return GpuValueType.DOUBLE;
+            default:
+                throw new IllegalStateException("no staging width for " + type);
+        }
+    }
+
     private static boolean isDoubleSafeInput(SqlTypeName type) {
         return type == SqlTypeName.DOUBLE
                 || type == SqlTypeName.FLOAT

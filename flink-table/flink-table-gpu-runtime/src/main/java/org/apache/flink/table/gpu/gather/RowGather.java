@@ -21,6 +21,9 @@ package org.apache.flink.table.gpu.gather;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.binary.BinaryRowData;
 import org.apache.flink.table.data.columnar.ColumnarRowData;
+import org.apache.flink.table.runtime.gpu.GpuValueType;
+
+import javax.annotation.Nullable;
 
 import java.lang.foreign.MemorySegment;
 import java.util.List;
@@ -71,29 +74,43 @@ public interface RowGather {
      * chooses the implementation inside {@code getScanRuntimeProvider}. There is no source ability
      * for negotiating layout.
      */
-    static RowGather forDouble(RowData sample, int field, DoubleColumn target) {
-        return forDouble(sample, field, target, null);
+    static RowGather forColumn(RowData sample, int field, GpuValueType type, StagingColumn target) {
+        return forColumn(sample, field, type, target, null);
     }
 
     /**
      * As {@link #forDouble(RowData, int, DoubleColumn)}, but given the staging buffer's segment a
      * columnar input gets the bulk path instead of per-row access.
      */
-    static RowGather forDouble(
-            RowData sample, int field, DoubleColumn target, MemorySegment targetSegment) {
+    static RowGather forColumn(
+            RowData sample,
+            int field,
+            GpuValueType type,
+            StagingColumn target,
+            @Nullable MemorySegment targetSegment) {
         if (sample instanceof ColumnarRowData) {
-            return targetSegment == null
-                    ? new ColumnarDoubleGather(field, target)
-                    : new BulkColumnarDoubleGather(field, target, targetSegment);
+            // The bulk path copies a HeapDoubleVector's backing array wholesale into a
+            // double-typed segment, so it has nothing to offer a narrower column; those fall back
+            // to the per-row columnar tier rather than getting a second bulk implementation for a
+            // path that is not reachable yet anyway (it needs a vectorized source).
+            boolean bulk = targetSegment != null && type == GpuValueType.DOUBLE;
+            return bulk
+                    ? new BulkColumnarDoubleGather(field, target, targetSegment)
+                    : new ColumnarGather(field, type, target);
         }
         if (sample instanceof BinaryRowData) {
-            return new BinaryDoubleGather(field, target);
+            return new BinaryGather(field, type, target);
         }
-        return new GenericDoubleGather(field, target);
+        return new GenericGather(field, type, target);
     }
 
-    /** Write side of a staging column, so gathers do not depend on the buffer implementation. */
-    interface DoubleColumn {
+    /**
+     * Write side of a staging column, so gathers do not depend on the buffer implementation.
+     *
+     * <p>Values cross as {@code double} whatever the column's width, because {@code INT} and {@code
+     * FLOAT} are both exact in one; the implementation narrows to the buffer it holds.
+     */
+    interface StagingColumn {
         void set(int position, double value);
     }
 }
