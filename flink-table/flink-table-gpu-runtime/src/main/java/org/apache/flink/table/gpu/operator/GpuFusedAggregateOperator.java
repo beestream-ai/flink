@@ -89,8 +89,11 @@ public class GpuFusedAggregateOperator extends AbstractStreamOperator<RowData>
                                 engine.inputSegment(c));
             }
         }
+        // The position, not zero. A gather writes by index into the staging buffer, so a constant
+        // here stacks every row onto the first slot and leaves the rest of the batch at zero.
+        int position = engine.position();
         for (RowGather gather : gathers) {
-            gather.accept(row, 0);
+            gather.accept(row, position);
         }
         engine.rowComplete();
     }

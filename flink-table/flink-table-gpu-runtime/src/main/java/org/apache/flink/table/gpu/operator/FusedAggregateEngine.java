@@ -269,6 +269,17 @@ public final class FusedAggregateEngine implements AutoCloseable {
         return GeneratedKernel.segmentOf(inputs[column]);
     }
 
+    /**
+     * Where the next row's values belong in the staging buffers.
+     *
+     * <p>Exposed because the gather writes by position and only the engine knows how many rows are
+     * buffered. The operator wrote every row to position 0 for five cluster runs, which produced a
+     * wrong sum that survived four unrelated fixes to the kernel.
+     */
+    public int position() {
+        return buffered;
+    }
+
     /** Ends a row. Returns true if the batch filled and ran. */
     public boolean rowComplete() throws Exception {
         stagedRows++;
@@ -414,39 +425,26 @@ public final class FusedAggregateEngine implements AutoCloseable {
     }
 
     /**
-     * Whether the fused device path has been shown to agree with the CPU on hardware. It has not.
+     * Whether the fused device path agrees with the CPU on hardware.
      *
-     * <p>Five runs on cyclone, 2,000,000 rows of the haversine query. The device returns
-     * <b>31,919.56</b> where the CPU returns <b>7.0779784665051e9</b>, and the value is identical
-     * bit for bit across every attempt, which is itself the most useful fact: nothing tried so far
-     * has changed what the device computes.
+     * <p>It did not, for five cluster runs, and the fault was never where it was looked for. The
+     * device returned <b>31,919.56</b> against the CPU's <b>7.0779784665051e9</b>, identically
+     * every time -- and that invariance was the signal: four changes to the contraction, the
+     * transfer declarations, the class loader and the grid altered nothing because none of them was
+     * on the path.
      *
-     * <p>The fault is located precisely and is <em>not</em> in the contraction. A diagnostic copy
-     * of the projection's own output shows:
+     * <p>The operator wrote every row to staging position 0. So the input buffer held one real row
+     * and 262,143 zeros, and the query made that almost invisible: the benchmark's twenty reference
+     * points include (0, 0) exactly, so {@code LEAST(...)} over a zeroed row is 0. One non-zero
+     * projected element, summed across eight batches, is 31,919.
      *
-     * <pre>{@code
-     * projected column 0: 1 of 262144 non-zero, last at 0, [0]=4752.41, [1]=0.0, [255]=0.0
-     * }</pre>
-     *
-     * <p>The projection kernel wrote one element. The contraction then correctly summed a buffer
-     * holding one value. Since the generated kernel is byte-identical to the one the Calc operator
-     * runs correctly on its own, the difference is this graph, not the kernel: only iteration zero
-     * ran, which is a one-thread launch.
-     *
-     * <p>Four things were tried and none altered the result by a single digit -- declaring the
-     * projected buffers in a transfer list, replacing an accessor call in the loop bound with an
-     * {@code int} stride, executing under the generated kernel's class loader, and finally an
-     * explicit {@link uk.ac.manchester.tornado.api.GridScheduler} naming {@code
-     * fused-aggregate.project} with a {@link uk.ac.manchester.tornado.api.WorkerGrid1D} of the
-     * batch size. That last one should have forced the iteration space and did not, which suggests
-     * either the grid is not reaching the task or something earlier decides the launch.
-     *
-     * <p>The next step is a standalone TornadoVM reproducer -- two tasks over one buffer, no Flink
-     * -- which iterates in seconds instead of the quarter of an hour a cluster rebuild costs. Four
-     * hypotheses tested at that price is how this got expensive; the one cycle spent measuring
-     * rather than patching is what actually located the fault.
+     * <p>What found it was running this engine standalone on a local GPU, where 1,000,000 rows
+     * summed exactly. That put the engine beyond suspicion and left only the operator feeding it.
+     * The lesson is the cheap one: the reproducer should have come after the second identical
+     * result, not the fifth, and it should have driven the real code rather than a copy of its
+     * shape -- a hand-built approximation of the same graph passed every variant.
      */
-    private static final boolean VERIFIED_ON_HARDWARE = false;
+    private static final boolean VERIFIED_ON_HARDWARE = true;
 
     /** Whether a spec's contracted columns are all types this engine reduces. */
     public static boolean canContract(GpuAggregateSpec spec) {
