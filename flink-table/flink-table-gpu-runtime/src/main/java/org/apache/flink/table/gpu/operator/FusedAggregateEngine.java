@@ -414,21 +414,39 @@ public final class FusedAggregateEngine implements AutoCloseable {
     }
 
     /**
-     * Whether the contraction has been shown to agree with the CPU on hardware.
+     * Whether the fused device path has been shown to agree with the CPU on hardware. It has not.
      *
-     * <p>It did not, the first time. On cyclone, 2,000,000 rows of the haversine query, the device
-     * returned <b>31,919.56</b> where the CPU returns <b>7.0779784665051e9</b> -- not
-     * reassociation, a different number -- while the log confirmed the fused operator ran and
-     * staged every row. Three things were wrong or missing and are fixed above: the projected
-     * buffers appeared in no transfer list, the stride was an accessor call inside the loop rather
-     * than a parameter, and the plan executed without the generated kernel's loader as the context
-     * loader.
+     * <p>Five runs on cyclone, 2,000,000 rows of the haversine query. The device returns
+     * <b>31,919.56</b> where the CPU returns <b>7.0779784665051e9</b>, and the value is identical
+     * bit for bit across every attempt, which is itself the most useful fact: nothing tried so far
+     * has changed what the device computes.
      *
-     * <p>Set back to true to test those. If it disagrees again, {@link #DIAGNOSE_FIRST_BATCH} says
-     * whether one thread ran or every thread summed one element, which separates the remaining
-     * candidates without another round trip.
+     * <p>The fault is located precisely and is <em>not</em> in the contraction. A diagnostic copy
+     * of the projection's own output shows:
+     *
+     * <pre>{@code
+     * projected column 0: 1 of 262144 non-zero, last at 0, [0]=4752.41, [1]=0.0, [255]=0.0
+     * }</pre>
+     *
+     * <p>The projection kernel wrote one element. The contraction then correctly summed a buffer
+     * holding one value. Since the generated kernel is byte-identical to the one the Calc operator
+     * runs correctly on its own, the difference is this graph, not the kernel: only iteration zero
+     * ran, which is a one-thread launch.
+     *
+     * <p>Four things were tried and none altered the result by a single digit -- declaring the
+     * projected buffers in a transfer list, replacing an accessor call in the loop bound with an
+     * {@code int} stride, executing under the generated kernel's class loader, and finally an
+     * explicit {@link uk.ac.manchester.tornado.api.GridScheduler} naming {@code
+     * fused-aggregate.project} with a {@link uk.ac.manchester.tornado.api.WorkerGrid1D} of the
+     * batch size. That last one should have forced the iteration space and did not, which suggests
+     * either the grid is not reaching the task or something earlier decides the launch.
+     *
+     * <p>The next step is a standalone TornadoVM reproducer -- two tasks over one buffer, no Flink
+     * -- which iterates in seconds instead of the quarter of an hour a cluster rebuild costs. Four
+     * hypotheses tested at that price is how this got expensive; the one cycle spent measuring
+     * rather than patching is what actually located the fault.
      */
-    private static final boolean VERIFIED_ON_HARDWARE = true;
+    private static final boolean VERIFIED_ON_HARDWARE = false;
 
     /** Whether a spec's contracted columns are all types this engine reduces. */
     public static boolean canContract(GpuAggregateSpec spec) {
