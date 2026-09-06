@@ -282,8 +282,36 @@ public final class FusedAggregateEngine implements AutoCloseable {
         }
     }
 
+    /**
+     * Off. The contraction returns a wrong answer on hardware and must not be reachable.
+     *
+     * <p>Measured on cyclone against vanilla Flink, 2,000,000 rows, the haversine query. The device
+     * path ran -- the log reports the fused operator active and 2,000,000 rows staged and
+     * contributed -- and returned <b>31,919.56</b> where the CPU returns <b>7.0779784665051e9</b>.
+     * That is not reassociation, it is a different number.
+     *
+     * <p>The ratio is the clue rather than the size. 7.078e9 spread over 2,000,000 rows averages
+     * about 3,540 per row, and 31,919 is close to nine of those -- one row per batch, over the
+     * eight-and-a-bit batches 2,000,000 rows make at this batch size. So each execution contributed
+     * roughly a single element instead of a strided sweep of the whole buffer.
+     *
+     * <p>The first thing to try is {@link #sumChunks} using {@code partials.getSize()} for the
+     * stride as well as the loop bound. A bound is read once on the host when the kernel is
+     * specialised; a stride is read on every iteration inside the kernel, which is a different
+     * thing to ask of an off-heap array accessor. Passing the partial count as an {@code int}
+     * parameter and striding by that would settle it, and is cheap to test.
+     *
+     * <p>Left in place rather than deleted because the plumbing above it is verified -- the pair
+     * fuses, the spec travels, the operator is selected, and the chained CPU fallback produces
+     * results identical to the unfused plan. Only the reduction kernel is wrong.
+     */
+    private static final boolean VERIFIED_ON_HARDWARE = false;
+
     /** Whether a spec's contracted columns are all types this engine reduces. */
     public static boolean canContract(GpuAggregateSpec spec) {
+        if (!VERIFIED_ON_HARDWARE) {
+            return false;
+        }
         GpuValueType[] outputs = spec.kernel().outputTypes();
         for (int source : spec.sumSources()) {
             if (source == GpuAggregateSpec.COUNT_STAR) {
