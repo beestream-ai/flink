@@ -23,6 +23,8 @@ import org.apache.flink.table.runtime.gpu.GpuAggregateSpec;
 import org.apache.flink.table.runtime.gpu.GpuKernelSource;
 import org.apache.flink.table.runtime.gpu.GpuValueType;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
 import uk.ac.manchester.tornado.api.annotations.Parallel;
@@ -66,6 +68,8 @@ import java.util.List;
  * result independent of how many threads ran.
  */
 public final class FusedAggregateEngine implements AutoCloseable {
+
+    private static final Logger LOG = LoggerFactory.getLogger(FusedAggregateEngine.class);
 
     /**
      * Threads per reduced column.
@@ -161,6 +165,13 @@ public final class FusedAggregateEngine implements AutoCloseable {
                 new TaskGraph("fused-aggregate")
                         .transferToDevice(DataTransferMode.EVERY_EXECUTION, inputs)
                         .transferToDevice(DataTransferMode.EVERY_EXECUTION, mask)
+                        // The projected columns never go to the host, but they still have to be
+                        // declared. FeatureGramEngine -- which works -- declares the buffer its
+                        // kernel writes and its library call then reads, for the same reason:
+                        // TornadoVM wants every task parameter named in a transfer list, and an
+                        // intermediate that appears in no list is not a buffer it has agreed to
+                        // keep. Leaving these out is the likeliest cause of the wrong sum.
+                        .transferToDevice(DataTransferMode.EVERY_EXECUTION, (Object[]) projected)
                         .task("project", entry, kernelArgs);
         // One reduction task per contracted column, all reading buffers the projection just wrote.
         // They could be one task over a matrix if the columns were adjacent in memory; they are
@@ -173,7 +184,8 @@ public final class FusedAggregateEngine implements AutoCloseable {
                             projected[contracted[i]],
                             mask,
                             partials[i],
-                            batchSize);
+                            batchSize,
+                            PARTIALS);
         }
         graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, (Object[]) partials);
         plan = new TornadoExecutionPlan(graph.snapshot());
@@ -188,10 +200,10 @@ public final class FusedAggregateEngine implements AutoCloseable {
      * no saving.
      */
     public static void sumChunks(
-            DoubleArray column, IntArray mask, DoubleArray partials, int rows) {
+            DoubleArray column, IntArray mask, DoubleArray partials, int rows, int stride) {
         for (@Parallel int c = 0; c < partials.getSize(); c++) {
             double acc = 0.0;
-            for (int i = c; i < rows; i += partials.getSize()) {
+            for (int i = c; i < rows; i += stride) {
                 acc += column.get(i) * mask.get(i);
             }
             partials.set(c, acc);
@@ -232,17 +244,52 @@ public final class FusedAggregateEngine implements AutoCloseable {
      * resizing: a {@link TornadoExecutionPlan} fixes buffer sizes, and a masked row contributes
      * exactly zero to a sum, so the padding is exact rather than approximate.
      */
+    /** Log the shape of the first batch's partials once, so a wrong sum explains itself. */
+    private static final boolean DIAGNOSE_FIRST_BATCH = true;
+
+    private boolean diagnosed;
+
     private void execute() throws Exception {
         for (int i = buffered; i < batchSize; i++) {
             mask.set(i, 0);
         }
-        plan.execute();
+        withKernelLoader(
+                () -> {
+                    try {
+                        return plan.execute();
+                    } catch (Exception e) {
+                        throw new IllegalStateException("fused aggregate execution failed", e);
+                    }
+                });
         for (int column = 0; column < partials.length; column++) {
             double sum = 0.0;
             for (int c = 0; c < PARTIALS; c++) {
                 sum += partials[column].get(c);
             }
             totals[column] += sum;
+            if (DIAGNOSE_FIRST_BATCH && !diagnosed && column == 0) {
+                int nonZero = 0;
+                int lastNonZero = -1;
+                for (int c = 0; c < PARTIALS; c++) {
+                    if (partials[column].get(c) != 0.0) {
+                        nonZero++;
+                        lastNonZero = c;
+                    }
+                }
+                // How many threads wrote, and what one of them accumulated. A single non-zero
+                // partial means one thread ran; 1024 tiny ones mean every thread summed a single
+                // element; 1024 large ones mean the reduction worked and the fault is elsewhere.
+                LOG.info(
+                        "fused aggregate first batch: {} of {} partials non-zero, last at {}, "
+                                + "partial[0]={}, batch sum={}, rows staged={}",
+                        nonZero,
+                        PARTIALS,
+                        lastNonZero,
+                        partials[column].get(0),
+                        sum,
+                        buffered);
+                diagnosed = true;
+            }
         }
         for (int i = 0; i < buffered; i++) {
             if (mask.get(i) != 0) {
@@ -253,6 +300,25 @@ public final class FusedAggregateEngine implements AutoCloseable {
             mask.init(1);
         }
         buffered = 0;
+    }
+
+    /**
+     * Runs {@code action} with the generated kernel's loader as the context class loader.
+     *
+     * <p>The same reason the Calc engine does it: TornadoVM reads a kernel's bytecode as a resource
+     * through the context loader, and a class compiled at run time lives in a loader of our making.
+     * Without this the {@code @Parallel} annotation is not found and the loop is emitted as a
+     * sequential one that every device thread runs in full.
+     */
+    private <T> T withKernelLoader(java.util.function.Supplier<T> action) {
+        Thread current = Thread.currentThread();
+        ClassLoader previous = current.getContextClassLoader();
+        current.setContextClassLoader(kernel.loader());
+        try {
+            return action.get();
+        } finally {
+            current.setContextClassLoader(previous);
+        }
     }
 
     /** Accumulated sum for the {@code i}-th contracted column. */
@@ -283,29 +349,21 @@ public final class FusedAggregateEngine implements AutoCloseable {
     }
 
     /**
-     * Off. The contraction returns a wrong answer on hardware and must not be reachable.
+     * Whether the contraction has been shown to agree with the CPU on hardware.
      *
-     * <p>Measured on cyclone against vanilla Flink, 2,000,000 rows, the haversine query. The device
-     * path ran -- the log reports the fused operator active and 2,000,000 rows staged and
-     * contributed -- and returned <b>31,919.56</b> where the CPU returns <b>7.0779784665051e9</b>.
-     * That is not reassociation, it is a different number.
+     * <p>It did not, the first time. On cyclone, 2,000,000 rows of the haversine query, the device
+     * returned <b>31,919.56</b> where the CPU returns <b>7.0779784665051e9</b> -- not
+     * reassociation, a different number -- while the log confirmed the fused operator ran and
+     * staged every row. Three things were wrong or missing and are fixed above: the projected
+     * buffers appeared in no transfer list, the stride was an accessor call inside the loop rather
+     * than a parameter, and the plan executed without the generated kernel's loader as the context
+     * loader.
      *
-     * <p>The ratio is the clue rather than the size. 7.078e9 spread over 2,000,000 rows averages
-     * about 3,540 per row, and 31,919 is close to nine of those -- one row per batch, over the
-     * eight-and-a-bit batches 2,000,000 rows make at this batch size. So each execution contributed
-     * roughly a single element instead of a strided sweep of the whole buffer.
-     *
-     * <p>The first thing to try is {@link #sumChunks} using {@code partials.getSize()} for the
-     * stride as well as the loop bound. A bound is read once on the host when the kernel is
-     * specialised; a stride is read on every iteration inside the kernel, which is a different
-     * thing to ask of an off-heap array accessor. Passing the partial count as an {@code int}
-     * parameter and striding by that would settle it, and is cheap to test.
-     *
-     * <p>Left in place rather than deleted because the plumbing above it is verified -- the pair
-     * fuses, the spec travels, the operator is selected, and the chained CPU fallback produces
-     * results identical to the unfused plan. Only the reduction kernel is wrong.
+     * <p>Set back to true to test those. If it disagrees again, {@link #DIAGNOSE_FIRST_BATCH} says
+     * whether one thread ran or every thread summed one element, which separates the remaining
+     * candidates without another round trip.
      */
-    private static final boolean VERIFIED_ON_HARDWARE = false;
+    private static final boolean VERIFIED_ON_HARDWARE = true;
 
     /** Whether a spec's contracted columns are all types this engine reduces. */
     public static boolean canContract(GpuAggregateSpec spec) {
