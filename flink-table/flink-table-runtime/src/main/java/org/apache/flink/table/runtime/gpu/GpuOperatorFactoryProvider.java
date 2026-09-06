@@ -52,6 +52,17 @@ public interface GpuOperatorFactoryProvider {
      */
     Optional<StreamOperatorFactory<RowData>> createCalcOperatorFactory(GpuCalcSpec spec);
 
+    /**
+     * A {@code Calc} and the ungrouped aggregate above it, as one operator.
+     *
+     * <p>Defaulted to empty so a provider built before fusion existed keeps working and simply
+     * declines, which lands the job on the chained CPU operator rather than failing to load.
+     */
+    default Optional<StreamOperatorFactory<RowData>> createAggregateOperatorFactory(
+            GpuAggregateSpec spec) {
+        return Optional.empty();
+    }
+
     /** Human-readable identity, for the EXPLAIN section and logs. */
     String describe();
 

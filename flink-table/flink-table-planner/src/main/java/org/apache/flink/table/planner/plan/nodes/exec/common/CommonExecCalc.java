@@ -111,14 +111,7 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
                         .setOperatorBaseClass(operatorBaseClass);
 
         final CodeGenOperatorFactory<RowData> substituteStreamOperator =
-                CalcCodeGenerator.generateCalcOperator(
-                        ctx,
-                        inputTransform,
-                        (RowType) getOutputType(),
-                        JavaScalaConversionUtil.toScala(projection),
-                        JavaScalaConversionUtil.toScala(Optional.ofNullable(this.condition)),
-                        retainHeader,
-                        getClass().getSimpleName());
+                generateCalcOperator(ctx, inputTransform);
         final StreamOperatorFactory<RowData> factory =
                 wrapForGpuOffload(planner, (RowType) getOutputType(), substituteStreamOperator);
         final Transformation<RowData> transform =
@@ -210,6 +203,31 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
                 groupName,
                 cpuCores,
                 taskHeap);
+    }
+
+    /**
+     * The code-generated operator for this Calc, over a given input.
+     *
+     * <p>Separated from {@link #translateToPlanInternal} so an aggregate that has fused this node
+     * can generate it without also generating this node's transformation. When the pair runs as one
+     * operator there is no Calc transformation to build, but there is still a Calc operator: it is
+     * what the TaskManager runs, chained ahead of the aggregate, when no device is available.
+     */
+    public CodeGenOperatorFactory<RowData> generateCalcOperator(
+            CodeGeneratorContext ctx, Transformation<RowData> inputTransform) {
+        return CalcCodeGenerator.generateCalcOperator(
+                ctx,
+                inputTransform,
+                (RowType) getOutputType(),
+                JavaScalaConversionUtil.toScala(projection),
+                JavaScalaConversionUtil.toScala(Optional.ofNullable(this.condition)),
+                retainHeader,
+                getClass().getSimpleName());
+    }
+
+    /** This Calc's expressions as a device kernel, or empty if they cannot be generated. */
+    public Optional<GpuKernelSource> gpuKernel() {
+        return GpuKernelGenerator.generate(projection, condition, Integer.toString(getId()));
     }
 
     /**
