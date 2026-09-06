@@ -202,6 +202,46 @@ class GpuOffloadDecisionTest {
     }
 
     @Test
+    @DisplayName("the total-work floor is applied per subtask, since each pays its own compile")
+    void totalWorkIsPerSubtask() {
+        // 200 rows x 100 ops = 20,000 against a floor of 10,000: clears it as one task, and does
+        // not once the same rows are split eight ways.
+        List<RowCost> node = List.of(RowCost.of(100));
+
+        assertTrue(new GpuOffloadDecision(96, 10_000).forSubtree(node, 200).offload());
+        assertTrue(new GpuOffloadDecision(96, 10_000, 1).forSubtree(node, 200).offload());
+        assertFalse(new GpuOffloadDecision(96, 10_000, 8).forSubtree(node, 200).offload());
+    }
+
+    @Test
+    @DisplayName("and says so, so the reason is not mistaken for the whole job's row count")
+    void perSubtaskVerdictNamesTheSplit() {
+        GpuOffloadDecision.Verdict v =
+                new GpuOffloadDecision(96, 10_000, 8).forSubtree(List.of(RowCost.of(100)), 200);
+
+        assertFalse(v.offload());
+        assertTrue(v.reason().contains("across 8 subtasks"), v.reason());
+        assertTrue(v.reason().contains("25 rows"), v.reason());
+    }
+
+    /** An unset or single parallelism must leave the old arithmetic exactly as it was. */
+    @Test
+    @DisplayName("an unknown parallelism does not divide anything")
+    void unknownParallelismChangesNothing() {
+        List<RowCost> node = List.of(RowCost.of(100));
+        String withoutIt = GpuOffloadDecision.withDefaults().forSubtree(node, 200_000).reason();
+        String withUnknown =
+                new GpuOffloadDecision(
+                                GpuOffloadDecision.DEFAULT_MIN_ROW_COST,
+                                GpuOffloadDecision.DEFAULT_MIN_TOTAL_WORK,
+                                GpuOffloadDecision.UNKNOWN_PARALLELISM)
+                        .forSubtree(node, 200_000)
+                        .reason();
+
+        assertEquals(withoutIt, withUnknown);
+    }
+
+    @Test
     @DisplayName("one ineligible node poisons the whole subtree")
     void ineligibleNodePoisonsSubtree() {
         GpuOffloadDecision.Verdict v =

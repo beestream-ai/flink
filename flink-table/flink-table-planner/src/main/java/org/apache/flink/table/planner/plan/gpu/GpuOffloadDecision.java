@@ -96,12 +96,31 @@ public final class GpuOffloadDecision {
      */
     public static final long DEFAULT_MIN_TOTAL_WORK = 10_000_000L;
 
+    /**
+     * Subtasks the work will be split across, or {@link #UNKNOWN_PARALLELISM}.
+     *
+     * <p>The total-work floor exists to repay what offloading costs <em>once per task</em> --
+     * chiefly compiling the kernel, about 15&nbsp;ms, which every subtask pays in full. The row
+     * count the planner estimates is for the whole job, so comparing it against that floor judges a
+     * 32-way job as though one subtask did all of it, and approves offloads that each pay the
+     * compile to process a thirty-second of the rows.
+     */
+    private int parallelismOverride = UNKNOWN_PARALLELISM;
+
     private final int minRowCost;
 
     private final long minTotalWork;
 
     public GpuOffloadDecision(int minRowCost) {
         this(minRowCost, DEFAULT_MIN_TOTAL_WORK);
+    }
+
+    /** Parallelism the planner could not determine, in which case the split is not applied. */
+    public static final int UNKNOWN_PARALLELISM = -1;
+
+    public GpuOffloadDecision(int minRowCost, long minTotalWork, int parallelism) {
+        this(minRowCost, minTotalWork);
+        this.parallelismOverride = parallelism;
     }
 
     public GpuOffloadDecision(int minRowCost, long minTotalWork) {
@@ -221,23 +240,38 @@ public final class GpuOffloadDecision {
         // skips it rather than guessing -- refusing on no evidence would silently disable offload
         // wherever the planner has no estimate.
         if (rowCount != GpuOffloadExecNode.UNKNOWN_ROW_COUNT && rowCount >= 0) {
-            double totalWork = rowCount * cost.weight();
+            // Per subtask, because the cost this floor repays is per subtask. The estimate is for
+            // the whole job and every subtask compiles its own kernel.
+            boolean split = parallelismOverride > 1;
+            double rowsPerSubtask = split ? rowCount / parallelismOverride : rowCount;
+            String perSubtask =
+                    split ? String.format(" across %d subtasks", parallelismOverride) : "";
+            double totalWork = rowsPerSubtask * cost.weight();
             if (totalWork < minTotalWork) {
                 return new Verdict(
                         false,
                         cost.weight(),
                         String.format(
-                                "below total-work floor: %.0f rows x %d weighted ops/row = %.3g < "
+                                "below total-work floor: %.0f rows%s x %d weighted ops/row = %.3g < "
                                         + "%d; too few rows to repay compiling the kernel",
-                                rowCount, cost.weight(), totalWork, minTotalWork));
+                                rowsPerSubtask,
+                                perSubtask,
+                                cost.weight(),
+                                totalWork,
+                                minTotalWork));
             }
             return new Verdict(
                     true,
                     cost.weight(),
                     String.format(
-                            "%d weighted ops/row clears floor of %d, and %.0f rows give %.3g "
+                            "%d weighted ops/row clears floor of %d, and %.0f rows%s give %.3g "
                                     + "weighted ops against a floor of %d",
-                            cost.weight(), minRowCost, rowCount, totalWork, minTotalWork));
+                            cost.weight(),
+                            minRowCost,
+                            rowsPerSubtask,
+                            perSubtask,
+                            totalWork,
+                            minTotalWork));
         }
         return new Verdict(
                 true,

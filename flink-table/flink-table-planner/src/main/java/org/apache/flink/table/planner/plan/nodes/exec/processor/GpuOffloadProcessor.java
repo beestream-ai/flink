@@ -19,6 +19,7 @@
 package org.apache.flink.table.planner.plan.nodes.exec.processor;
 
 import org.apache.flink.table.api.TableConfig;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadOptions;
@@ -77,7 +78,8 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
         GpuOffloadDecision decision =
                 new GpuOffloadDecision(
                         config.get(GpuOffloadOptions.MIN_ROW_COST),
-                        config.get(GpuOffloadOptions.MIN_TOTAL_WORK));
+                        config.get(GpuOffloadOptions.MIN_TOTAL_WORK),
+                        config.get(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM));
 
         List<ExecNode<?>> order = topologicalOrder(execGraph);
         Map<ExecNode<?>, Integer> consumerCount = countConsumers(order);
