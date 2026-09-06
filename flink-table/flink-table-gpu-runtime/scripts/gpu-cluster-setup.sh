@@ -125,6 +125,18 @@ OFF_HEAP="${OFF_HEAP:-4g}"
 # "exceed configured Total Flink Memory".
 PROCESS_MEM="${PROCESS_MEM:-16g}"
 
+# Whether this TaskManager advertises a GPU to the scheduler.
+#
+# Only the amount matters here. A driver factory is what an operator would need to ask which device
+# it was given; the scheduler needs nothing but the number, and ExternalResourceUtils reads the
+# amount independently of whether a driver is configured.
+#
+# Set DECLARE_GPU=0 for a TaskManager that should not be offered offloaded work -- which is what
+# heterogeneous-fallback.sh is testing, and the only case in this repo where the answer is no.
+DECLARE_GPU="${DECLARE_GPU:-1}"
+GPU_RESOURCE_NAME="${GPU_RESOURCE_NAME:-gpu}"
+GPU_RESOURCE_AMOUNT="${GPU_RESOURCE_AMOUNT:-1}"
+
 # Flatten the argfile into one line. Comments and blank lines go; everything else is a JVM flag.
 FLAGS=$(TORNADOVM_HOME="${TORNADOVM_HOME}" envsubst < "${TORNADOVM_HOME}/tornado-argfile.template" \
         | grep -vE '^\s*#' | grep -vE '^\s*$' | tr '\n' ' ' | sed 's/  */ /g; s/ $//')
@@ -171,6 +183,19 @@ if ! grep -q "off-heap" "${CONFIG}.tmp"; then
     exit 1
 fi
 mv "${CONFIG}.tmp" "${CONFIG}"
+
+# Appended rather than woven in: these are dotted top-level keys, which Flink's YAML reads as the
+# flat names directly, so they need no place in the nested tree above.
+if [[ "${DECLARE_GPU}" == "1" ]]; then
+    {
+        echo ""
+        echo "external-resource.list: ${GPU_RESOURCE_NAME}"
+        echo "external-resource.${GPU_RESOURCE_NAME}.amount: ${GPU_RESOURCE_AMOUNT}"
+    } >> "${CONFIG}"
+    echo "declared external-resource.${GPU_RESOURCE_NAME}.amount=${GPU_RESOURCE_AMOUNT}"
+else
+    echo "no external resource declared (DECLARE_GPU=0)"
+fi
 
 echo "wrote TornadoVM flags to ${CONFIG}"
 echo "set taskmanager.memory.task.off-heap.size=${OFF_HEAP}, process.size=${PROCESS_MEM}"

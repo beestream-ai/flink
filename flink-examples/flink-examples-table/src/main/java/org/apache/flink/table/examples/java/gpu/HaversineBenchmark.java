@@ -18,6 +18,7 @@
 
 package org.apache.flink.table.examples.java.gpu;
 
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.types.Row;
@@ -189,6 +190,16 @@ public final class HaversineBenchmark {
 
         if (args.gpu) {
             env.getConfig().getConfiguration().setString("table.exec.gpu-offload.enabled", "true");
+            if (args.requireDevice) {
+                // Asks the scheduler for a slot that declares the resource, rather than taking
+                // whatever slot arrives and finding out on the TaskManager. Requesting one means
+                // specifying the whole slot: Flink rejects a slot sharing group that names an
+                // external resource without also naming cpu cores and task heap.
+                Configuration conf = env.getConfig().getConfiguration();
+                conf.setString("table.exec.gpu-offload.require-device", "true");
+                conf.setString("table.exec.gpu-offload.device.cpu-cores", args.deviceCpuCores);
+                conf.setString("table.exec.gpu-offload.device.task-heap", args.deviceTaskHeap);
+            }
         }
 
         // Reading and counting, with almost no arithmetic: everything the job costs that is not the
@@ -319,6 +330,9 @@ public final class HaversineBenchmark {
         private int runs = 10;
         private String format = "csv";
         private boolean gpu;
+        private boolean requireDevice;
+        private String deviceCpuCores = "1.0";
+        private String deviceTaskHeap = "2g";
         private boolean generate;
         private boolean explain;
         private boolean baseline;
@@ -338,6 +352,12 @@ public final class HaversineBenchmark {
                     args.runs = Integer.parseInt(argv[++i]);
                 } else if ("--format".equals(flag)) {
                     args.format = argv[++i];
+                } else if ("--require-device".equals(flag)) {
+                    args.requireDevice = Boolean.parseBoolean(argv[++i]);
+                } else if ("--device-cpu-cores".equals(flag)) {
+                    args.deviceCpuCores = argv[++i];
+                } else if ("--device-task-heap".equals(flag)) {
+                    args.deviceTaskHeap = argv[++i];
                 } else if ("--gpu".equals(flag)) {
                     args.gpu = Boolean.parseBoolean(argv[++i]);
                 } else if ("--generate".equals(flag)) {
