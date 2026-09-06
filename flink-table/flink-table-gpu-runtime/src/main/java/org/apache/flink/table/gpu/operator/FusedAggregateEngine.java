@@ -212,6 +212,14 @@ public final class FusedAggregateEngine implements AutoCloseable {
                             PARTIALS,
                             chunkSizeFor(batchSize));
         }
+        if (DIAGNOSE_FIRST_BATCH) {
+            // Bring the projection's own output back, purely to see it. Two kernel shapes whose
+            // threads read disjoint index sets returned an identical partial, which can only mean
+            // one element of this buffer is non-zero -- so the question is whether the projection
+            // wrote one element, or the contraction is reading a buffer the projection never
+            // touched. Counting non-zeros here answers it and costs one copy on a debug build.
+            graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, projected[0]);
+        }
         graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, (Object[]) partials);
         plan = new TornadoExecutionPlan(graph.snapshot());
     }
@@ -305,15 +313,31 @@ public final class FusedAggregateEngine implements AutoCloseable {
                 // How many threads wrote, and what one of them accumulated. A single non-zero
                 // partial means one thread ran; 1024 tiny ones mean every thread summed a single
                 // element; 1024 large ones mean the reduction worked and the fault is elsewhere.
+                int projectedNonZero = 0;
+                int projectedLast = -1;
+                for (int i = 0; i < batchSize; i++) {
+                    if (projected[0].get(i) != 0.0) {
+                        projectedNonZero++;
+                        projectedLast = i;
+                    }
+                }
                 LOG.info(
                         "fused aggregate first batch: {} of {} partials non-zero, last at {}, "
-                                + "partial[0]={}, batch sum={}, rows staged={}",
+                                + "partial[0]={}, batch sum={}, rows staged={}; "
+                                + "projected column 0: {} of {} non-zero, last at {}, "
+                                + "[0]={}, [1]={}, [255]={}",
                         nonZero,
                         PARTIALS,
                         lastNonZero,
                         partials[column].get(0),
                         sum,
-                        buffered);
+                        buffered,
+                        projectedNonZero,
+                        batchSize,
+                        projectedLast,
+                        projected[0].get(0),
+                        projected[0].get(1),
+                        projected[0].get(255));
                 diagnosed = true;
             }
         }
