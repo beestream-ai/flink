@@ -190,6 +190,14 @@ public final class HaversineBenchmark {
 
         if (args.gpu) {
             env.getConfig().getConfiguration().setString("table.exec.gpu-offload.enabled", "true");
+            if (!args.fuseAggregate) {
+                // The unfused arm: the Calc still runs on the device, the SUM above it still runs
+                // on the CPU, and the projected rows travel between them. That is what fusing is
+                // measured against, and both arms have to be one session apart at most.
+                env.getConfig()
+                        .getConfiguration()
+                        .setString("table.exec.gpu-offload.fuse-aggregate", "false");
+            }
             if (args.requireDevice) {
                 // Asks the scheduler for a slot that declares the resource, rather than taking
                 // whatever slot arrives and finding out on the TaskManager. Requesting one means
@@ -331,6 +339,7 @@ public final class HaversineBenchmark {
         private String format = "csv";
         private boolean gpu;
         private boolean requireDevice;
+        private boolean fuseAggregate = true;
         private String deviceCpuCores = "1.0";
         private String deviceTaskHeap = "2g";
         private boolean generate;
@@ -352,6 +361,8 @@ public final class HaversineBenchmark {
                     args.runs = Integer.parseInt(argv[++i]);
                 } else if ("--format".equals(flag)) {
                     args.format = argv[++i];
+                } else if ("--fuse-aggregate".equals(flag)) {
+                    args.fuseAggregate = Boolean.parseBoolean(argv[++i]);
                 } else if ("--require-device".equals(flag)) {
                     args.requireDevice = Boolean.parseBoolean(argv[++i]);
                 } else if ("--device-cpu-cores".equals(flag)) {

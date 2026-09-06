@@ -179,7 +179,7 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
     protected Transformation<RowData> translateToPlanInternal(
             PlannerBase planner, ExecNodeConfig config) {
         final ExecEdge inputEdge = getInputEdges().get(0);
-        final CommonExecCalc fusedCalc = fusedCalc();
+        final CommonExecCalc fusedCalc = fusedCalc(config);
         // When a Calc is fused into this node it produces no transformation of its own: this
         // operator consumes what the Calc would have consumed, and runs the Calc's work itself --
         // as a kernel writing to a device buffer the contraction then reads, or as the generated
@@ -265,7 +265,12 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
      *
      * @return the fused Calc, or null
      */
-    private @Nullable CommonExecCalc fusedCalc() {
+    private @Nullable CommonExecCalc fusedCalc(ExecNodeConfig config) {
+        if (!config.get(GpuOffloadOptions.FUSE_AGGREGATE)) {
+            // Left unfused deliberately. The Calc still offloads on its own and this aggregate
+            // still runs the generated operator, which is the shape to measure fusion against.
+            return null;
+        }
         GpuOffloadAssignment mine = getGpuOffloadAssignment();
         if (mine == null || !mine.isOffloaded()) {
             return null;

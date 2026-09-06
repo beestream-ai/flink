@@ -154,6 +154,26 @@ public class GpuOffloadOptions {
                             "Off-heap for that slot. Staging buffers are off-heap, so this is not "
                                     + "the place to leave the default of zero.");
 
+    /**
+     * Whether an ungrouped aggregate is fused into the {@code Calc} beneath it.
+     *
+     * <p>On by default, because fusing is the point: unfused, the {@code Calc} writes every
+     * projected row to the host for a separate aggregate to read back, and the intermediate is the
+     * thing a device pass exists to avoid materialising.
+     *
+     * <p>It is switchable because the two paths are otherwise impossible to compare. Both arms have
+     * to run in one session -- this project's own numbers moved 6% between sittings -- and without
+     * a switch the unfused path is unreachable once the planner has learned to fuse.
+     */
+    public static final ConfigOption<Boolean> FUSE_AGGREGATE =
+            ConfigOptions.key("table.exec.gpu-offload.fuse-aggregate")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "If true, an ungrouped SUM over an offloaded Calc runs as one device "
+                                    + "pass with the projection, so the intermediate never returns "
+                                    + "to the host. Turn off to measure what that is worth.");
+
     public static final ConfigOption<Long> MIN_TOTAL_WORK =
             ConfigOptions.key(GpuOffloadDecision.MIN_TOTAL_WORK_KEY)
                     .longType()
