@@ -401,6 +401,30 @@ under the License.
 					</execution>
 
 					<execution>
+						<id>MixedTypeVerification</id>
+						<phase>package</phase>
+						<goals>
+							<goal>jar</goal>
+						</goals>
+
+						<configuration>
+							<classifier>MixedTypeVerification</classifier>
+
+							<archive>
+								<manifestEntries>
+									<program-class>org.apache.flink.table.examples.java.gpu.MixedTypeVerification</program-class>
+								</manifestEntries>
+							</archive>
+
+							<includes>
+								<include>org/apache/flink/table/examples/java/gpu/MixedTypeVerification*</include>
+								<include>META-INF/LICENSE</include>
+								<include>META-INF/NOTICE</include>
+							</includes>
+						</configuration>
+					</execution>
+
+					<execution>
 						<id>FeatureGramBenchmark</id>
 						<phase>package</phase>
 						<goals>
@@ -469,6 +493,7 @@ under the License.
 								<copy file="${project.basedir}/target/flink-examples-table_${scala.binary.version}-${project.version}-HaversineBenchmark.jar" tofile="${project.basedir}/target/HaversineBenchmark.jar"/>
 								<copy file="${project.basedir}/target/flink-examples-table_${scala.binary.version}-${project.version}-FeatureGramBenchmark.jar" tofile="${project.basedir}/target/FeatureGramBenchmark.jar"/>
 								<copy file="${project.basedir}/target/flink-examples-table_${scala.binary.version}-${project.version}-LogisticRegressionBenchmark.jar" tofile="${project.basedir}/target/LogisticRegressionBenchmark.jar"/>
+								<copy file="${project.basedir}/target/flink-examples-table_${scala.binary.version}-${project.version}-MixedTypeVerification.jar" tofile="${project.basedir}/target/MixedTypeVerification.jar"/>
 							</target>
 						</configuration>
 					</execution>
