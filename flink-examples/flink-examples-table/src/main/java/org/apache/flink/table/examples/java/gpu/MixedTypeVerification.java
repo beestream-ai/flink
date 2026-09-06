@@ -47,9 +47,18 @@ import org.apache.flink.util.CloseableIterator;
  */
 public final class MixedTypeVerification {
 
-    /** Same shape for each column, so the arms differ only in which one they read. */
+    /**
+     * Same shape for each column, so the arms differ only in which one they read.
+     *
+     * <p>Every literal carries {@code E0}, and that is not cosmetic. Without it {@code 8.0} is a
+     * {@code DECIMAL} in Flink SQL, so {@code i / 8.0} is {@code DECIMAL(17, 6)}, the estimator
+     * refuses the expression as not expressible, and <em>both</em> arms run on the CPU. The first
+     * run of this verifier did exactly that and reported the {@code INT} case as agreeing -- which
+     * it did, for a reason that had nothing to do with staging.
+     */
     private static final String HEAVY =
-            "EXP(%1$s / 8.0) * LN(ABS(%1$s) + 1.0) + SIN(%1$s) * COS(%1$s) + POWER(%1$s / 4.0, 3.0)";
+            "EXP(%1$s / 100.0E0) * LN(ABS(%1$s) + 1.0E0) + SIN(%1$s) * COS(%1$s)"
+                    + " + POWER(%1$s / 4.0E0, 3.0E0)";
 
     private MixedTypeVerification() {}
 
@@ -64,7 +73,11 @@ public final class MixedTypeVerification {
             {"int", String.format(HEAVY, "i")},
             {"float", String.format(HEAVY, "f")},
             {"double", String.format(HEAVY, "d")},
-            {"mixed", "EXP(i / 8.0) * LN(ABS(f) + 1.0) + SIN(d) * COS(i) + POWER(f / 4.0, 3.0)"},
+            {
+                "mixed",
+                "EXP(i / 100.0E0) * LN(ABS(f) + 1.0E0) + SIN(d) * COS(i)"
+                        + " + POWER(f / 4.0E0, 3.0E0)"
+            },
             {"passthrough-float", String.format(HEAVY, "d") + " + f"},
         };
 
