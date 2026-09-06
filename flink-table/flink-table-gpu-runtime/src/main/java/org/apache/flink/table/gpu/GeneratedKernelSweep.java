@@ -22,6 +22,7 @@ import org.apache.flink.table.gpu.metrics.OffloadMetrics;
 import org.apache.flink.table.gpu.operator.GeneratedKernelEngine;
 import org.apache.flink.table.runtime.gpu.GpuCalcSpec;
 import org.apache.flink.table.runtime.gpu.GpuKernelSource;
+import org.apache.flink.table.runtime.gpu.GpuValueType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -112,7 +113,7 @@ public final class GeneratedKernelSweep {
             double sink = 0;
             for (int i = 0; i < count; i++) {
                 if (engine.selected(i)) {
-                    sink += engine.output(0, i);
+                    sink += ((Number) engine.output(0, i)).doubleValue();
                     emitted++;
                 }
             }
@@ -129,7 +130,7 @@ public final class GeneratedKernelSweep {
 
     private static void stage(GeneratedKernelEngine engine, double[] input, int start, int count) {
         for (int i = 0; i < count; i++) {
-            engine.setInput(0, i, input[start + i]);
+            engine.inputColumn(0).set(i, input[start + i]);
         }
     }
 
@@ -194,7 +195,8 @@ public final class GeneratedKernelSweep {
                         "evaluate",
                         source,
                         new int[] {0},
-                        1,
+                        new GpuValueType[] {GpuValueType.DOUBLE},
+                        new GpuValueType[] {GpuValueType.DOUBLE},
                         true,
                         new int[] {GpuCalcSpec.COMPUTED});
         return new GpuCalcSpec(

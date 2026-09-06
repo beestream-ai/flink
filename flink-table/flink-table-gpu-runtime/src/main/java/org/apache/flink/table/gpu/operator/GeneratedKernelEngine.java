@@ -34,23 +34,13 @@ import uk.ac.manchester.tornado.api.types.arrays.DoubleArray;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
-import javax.tools.JavaCompiler;
-import javax.tools.ToolProvider;
-
 import java.io.IOException;
 import java.lang.reflect.Method;
-import java.net.URISyntaxException;
-import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.security.ProtectionDomain;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
-import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.stream.Stream;
 
 /**
@@ -86,8 +76,7 @@ public final class GeneratedKernelEngine implements AutoCloseable {
 
     private Object[] outputs;
     private IntArray mask;
-    private Path workDir;
-    private URLClassLoader loader;
+    private GeneratedKernel generated;
     private TornadoExecutionPlan plan;
 
     private final OffloadMetrics metrics = new OffloadMetrics();
@@ -146,105 +135,8 @@ public final class GeneratedKernelEngine implements AutoCloseable {
     }
 
     private Method compile(GpuKernelSource kernel) throws Exception {
-        JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
-        if (javac == null) {
-            throw new IllegalStateException(
-                    "No Java compiler available: GPU offload generates kernels at run time and so "
-                            + "needs a JDK, not a JRE. TornadoVM requires one in any case.");
-        }
-        workDir = Files.createTempDirectory("flink-gpu-kernel");
-        // The generated class name contains '$' to keep it distinct from anything hand-written;
-        // the file must be named after the class for javac to accept it.
-        String fileName = kernel.className() + ".java";
-        Path source = workDir.resolve(fileName);
-        Files.writeString(source, kernel.source());
-
-        List<String> options =
-                new ArrayList<>(
-                        Arrays.asList(
-                                "-classpath",
-                                classpathFor(),
-                                "-d",
-                                workDir.toString(),
-                                "--enable-preview",
-                                "-source",
-                                "21",
-                                "-target",
-                                "21",
-                                // Debug info is not optional. @Parallel is a local-variable
-                                // annotation, and TornadoVM associates it with the loop induction
-                                // variable through the local variable table. Without -g javac emits
-                                // no such table, the annotation is silently ignored, and the kernel
-                                // is generated as a sequential loop that every GPU thread runs in
-                                // full -- correct results, catastrophically slow, and no warning.
-                                "-g",
-                                "-nowarn"));
-        options.add(source.toString());
-
-        int rc = javac.run(null, null, System.err, options.toArray(new String[0]));
-        if (rc != 0) {
-            throw new IllegalStateException(
-                    "Generated kernel did not compile. This is a bug in the generator; the source "
-                            + "was:\n"
-                            + kernel.source());
-        }
-
-        loader =
-                new URLClassLoader(
-                        new URL[] {workDir.toUri().toURL()},
-                        GeneratedKernelEngine.class.getClassLoader());
-        Class<?> generated = loader.loadClass(kernel.className());
-        for (Method m : generated.getDeclaredMethods()) {
-            if (m.getName().equals(kernel.methodName())) {
-                return m;
-            }
-        }
-        throw new IllegalStateException("generated class has no method " + kernel.methodName());
-    }
-
-    /**
-     * Classpath for compiling the kernel.
-     *
-     * <p>Built from the code-source locations of the very classes the generated source imports,
-     * rather than from {@code java.class.path}. Under TornadoVM's own launch configuration the API
-     * is on the JVM's <em>module</em> path, so {@code java.class.path} does not mention it and a
-     * classpath derived from it produces "package uk.ac.manchester.tornado.api does not exist". A
-     * protection domain's code source is where the class actually came from, whether that was the
-     * class path, the module path, or a user-code loader inside a TaskManager.
-     */
-    private static String classpathFor() {
-        LinkedHashSet<String> entries = new LinkedHashSet<>();
-        String systemPath = System.getProperty("java.class.path", "");
-        if (!systemPath.isEmpty()) {
-            entries.addAll(Arrays.asList(systemPath.split(java.io.File.pathSeparator)));
-        }
-        for (Class<?> referenced :
-                new Class<?>[] {
-                    uk.ac.manchester.tornado.api.annotations.Parallel.class,
-                    uk.ac.manchester.tornado.api.math.TornadoMath.class,
-                    DoubleArray.class,
-                    FloatArray.class,
-                    IntArray.class
-                }) {
-            String location = codeSourceOf(referenced);
-            if (location != null) {
-                entries.add(location);
-            }
-        }
-        return String.join(java.io.File.pathSeparator, entries);
-    }
-
-    private static String codeSourceOf(Class<?> type) {
-        try {
-            ProtectionDomain domain = type.getProtectionDomain();
-            if (domain == null || domain.getCodeSource() == null) {
-                return null;
-            }
-            URL location = domain.getCodeSource().getLocation();
-            return location == null ? null : Paths.get(location.toURI()).toString();
-        } catch (URISyntaxException | RuntimeException e) {
-            return null;
-        }
+        generated = new GeneratedKernel(kernel);
+        return generated.compile();
     }
 
     /** Write side of one staged input column. */
@@ -256,20 +148,7 @@ public final class GeneratedKernelEngine implements AutoCloseable {
      * between runs.
      */
     private static Object allocate(GpuValueType type, int batchSize) {
-        switch (type) {
-            case INT:
-                IntArray ints = new IntArray(batchSize);
-                ints.init(0);
-                return ints;
-            case FLOAT:
-                FloatArray floats = new FloatArray(batchSize);
-                floats.init(0.0f);
-                return floats;
-            default:
-                DoubleArray doubles = new DoubleArray(batchSize);
-                doubles.init(0.0);
-                return doubles;
-        }
+        return GeneratedKernel.allocate(type, batchSize);
     }
 
     /**
@@ -280,21 +159,12 @@ public final class GeneratedKernelEngine implements AutoCloseable {
      * once per value.
      */
     public RowGather.StagingColumn inputColumn(int column) {
-        Object buffer = inputs[column];
-        if (buffer instanceof IntArray ints) {
-            return (position, value) -> ints.set(position, (int) value);
-        }
-        if (buffer instanceof FloatArray floats) {
-            return (position, value) -> floats.set(position, (float) value);
-        }
-        DoubleArray doubles = (DoubleArray) buffer;
-        return doubles::set;
+        return GeneratedKernel.writerFor(inputs[column]);
     }
 
     /** Off-heap buffer for one staged input column, for gathers that can bulk-copy into it. */
     public java.lang.foreign.MemorySegment inputSegment(int column) {
-        Object buffer = inputs[column];
-        return buffer instanceof DoubleArray doubles ? doubles.getSegment() : null;
+        return GeneratedKernel.segmentOf(inputs[column]);
     }
 
     /**
@@ -349,7 +219,7 @@ public final class GeneratedKernelEngine implements AutoCloseable {
     private <T> T withKernelLoader(java.util.function.Supplier<T> action) {
         Thread current = Thread.currentThread();
         ClassLoader previous = current.getContextClassLoader();
-        current.setContextClassLoader(loader);
+        current.setContextClassLoader(generated.loader());
         try {
             return action.get();
         } finally {
@@ -374,13 +244,9 @@ public final class GeneratedKernelEngine implements AutoCloseable {
             plan.close();
             plan = null;
         }
-        if (loader != null) {
-            loader.close();
-            loader = null;
-        }
-        if (workDir != null) {
-            deleteRecursively(workDir);
-            workDir = null;
+        if (generated != null) {
+            generated.close();
+            generated = null;
         }
     }
 

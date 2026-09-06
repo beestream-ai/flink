@@ -21,7 +21,10 @@ package org.apache.flink.table.gpu.provider;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.gpu.operator.FusedAggregateEngine;
 import org.apache.flink.table.gpu.operator.GpuCalcOperator;
+import org.apache.flink.table.gpu.operator.GpuFusedAggregateOperator;
+import org.apache.flink.table.runtime.gpu.GpuAggregateSpec;
 import org.apache.flink.table.runtime.gpu.GpuCalcSpec;
 import org.apache.flink.table.runtime.gpu.GpuOperatorFactoryProvider;
 
@@ -82,6 +85,21 @@ public class TornadoGpuOperatorFactoryProvider implements GpuOperatorFactoryProv
             }
             return "TornadoVM is not usable in this JVM: " + detail;
         }
+    }
+
+    @Override
+    public Optional<StreamOperatorFactory<RowData>> createAggregateOperatorFactory(
+            GpuAggregateSpec spec) {
+        if (UNAVAILABLE != null) {
+            return Optional.empty();
+        }
+        if (!FusedAggregateEngine.canContract(spec)) {
+            // A contracted column that is not a DOUBLE has no reduction kernel yet, and is the one
+            // case where a library call would be the right answer rather than a precision loss.
+            // Declining lands the pair on the chained CPU operators: correct, merely slower.
+            return Optional.empty();
+        }
+        return Optional.of(SimpleOperatorFactory.of(new GpuFusedAggregateOperator(spec)));
     }
 
     @Override
