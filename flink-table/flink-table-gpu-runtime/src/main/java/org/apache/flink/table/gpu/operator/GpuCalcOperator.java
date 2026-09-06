@@ -225,6 +225,20 @@ public class GpuCalcOperator extends AbstractStreamOperator<RowData>
                     }
                 };
             }
+            if (root == LogicalTypeRoot.FLOAT) {
+                float[] values = new float[capacity];
+                return new PassThroughBuffer(inputField) {
+                    @Override
+                    void accept(RowData row, int position) {
+                        values[position] = row.getFloat(inputField);
+                    }
+
+                    @Override
+                    void writeInto(GenericRowData out, int field, int position) {
+                        out.setField(field, values[position]);
+                    }
+                };
+            }
             if (root == LogicalTypeRoot.DOUBLE) {
                 double[] values = new double[capacity];
                 return new PassThroughBuffer(inputField) {

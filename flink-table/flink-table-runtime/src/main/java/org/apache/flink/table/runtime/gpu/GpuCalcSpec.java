@@ -114,11 +114,16 @@ public final class GpuCalcSpec implements Serializable {
         for (int i = 0; i < outputLayout.length; i++) {
             LogicalTypeRoot root = fields.get(i).getTypeRoot();
             if (outputLayout[i] == COMPUTED) {
-                if (root != LogicalTypeRoot.DOUBLE) {
+                // FLOAT joins DOUBLE now that a computed column is written to a buffer of its own
+                // declared width and narrowed inside the kernel. While every output was a
+                // DoubleArray this had to refuse it, or the row would carry a Double in a field
+                // the type says is a Float.
+                if (root != LogicalTypeRoot.DOUBLE && root != LogicalTypeRoot.FLOAT) {
                     return false;
                 }
             } else if (root != LogicalTypeRoot.BIGINT
                     && root != LogicalTypeRoot.INTEGER
+                    && root != LogicalTypeRoot.FLOAT
                     && root != LogicalTypeRoot.DOUBLE) {
                 return false;
             }
