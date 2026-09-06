@@ -25,8 +25,10 @@ import org.apache.flink.table.runtime.gpu.GpuValueType;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
+import uk.ac.manchester.tornado.api.WorkerGrid1D;
 import uk.ac.manchester.tornado.api.annotations.Parallel;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.types.arrays.DoubleArray;
@@ -221,7 +223,20 @@ public final class FusedAggregateEngine implements AutoCloseable {
             graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, projected[0]);
         }
         graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, (Object[]) partials);
-        plan = new TornadoExecutionPlan(graph.snapshot());
+        // Every task's iteration space, stated rather than inferred.
+        //
+        // This is the whole bug. The projection kernel is the same generated source the Calc
+        // operator runs correctly on its own, and in this graph it wrote exactly one element of
+        // 262,144 -- a one-thread grid, so only iteration zero ran. Three fixes downstream of that
+        // changed nothing, because nothing downstream was wrong. A graph of several tasks with
+        // different natural widths gives TornadoVM nothing to infer from, and a GridScheduler is
+        // how it is told instead of guessed at.
+        GridScheduler grid = new GridScheduler();
+        grid.addWorkerGrid("fused-aggregate.project", new WorkerGrid1D(batchSize));
+        for (int i = 0; i < contracted.length; i++) {
+            grid.addWorkerGrid("fused-aggregate.sum" + i, new WorkerGrid1D(PARTIALS));
+        }
+        plan = new TornadoExecutionPlan(graph.snapshot()).withGridScheduler(grid);
     }
 
     /**
