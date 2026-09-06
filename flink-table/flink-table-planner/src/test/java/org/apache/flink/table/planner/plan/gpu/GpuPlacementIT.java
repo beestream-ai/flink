@@ -94,6 +94,23 @@ class GpuPlacementIT {
                 thrown.getMessage());
     }
 
+    /**
+     * The one name that would not break the chain is the one Flink ignores.
+     *
+     * <p>A vertex in the default group resolves to its region's slot sharing group, and the
+     * resources registered under the default name are never read. Accepting the setting would
+     * produce a job that looks configured for a device and asks for nothing.
+     */
+    @Test
+    @DisplayName("the default slot sharing group is refused rather than silently ignored")
+    void refusesTheDefaultGroup() {
+        requireDevice();
+        tEnv.getConfig().set(GpuOffloadOptions.DEVICE_SLOT_SHARING_GROUP, "default");
+        IllegalArgumentException thrown =
+                assertThrows(IllegalArgumentException.class, () -> tEnv.explainSql(HEAVY));
+        assertTrue(thrown.getMessage().contains("silently dropped"), thrown.getMessage());
+    }
+
     /** A node that was never selected must not drag a device requirement onto the job. */
     @Test
     @DisplayName("a query that does not offload asks for nothing, even half-configured")

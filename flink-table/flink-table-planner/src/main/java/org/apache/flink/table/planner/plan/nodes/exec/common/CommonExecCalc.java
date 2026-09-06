@@ -172,6 +172,14 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
         }
 
         final String groupName = config.get(GpuOffloadOptions.DEVICE_SLOT_SHARING_GROUP);
+        if (GpuOffloadOptions.DEFAULT_SLOT_SHARING_GROUP_NAME.equals(groupName)) {
+            throw new IllegalArgumentException(
+                    GpuOffloadOptions.DEVICE_SLOT_SHARING_GROUP.key()
+                            + " cannot be \"default\". Flink resolves a vertex in the default "
+                            + "group to its region's slot sharing group and never reads the "
+                            + "resources registered under that name, so the requirement would be "
+                            + "silently dropped rather than merely weakened. Name a group.");
+        }
         final SlotSharingGroup group =
                 SlotSharingGroup.newBuilder(groupName)
                         .setCpuCores(cpuCores)

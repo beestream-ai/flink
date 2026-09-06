@@ -66,25 +66,31 @@ public class GpuOffloadOptions {
                                     + "job will wait for a slot rather than fall back to the CPU.");
 
     /**
-     * The slot sharing group the requirement is attached to.
+     * The slot sharing group the requirement is attached to, which cannot be the default one.
      *
-     * <p>Defaulting to {@code default} is a performance decision rather than a placement one.
-     * {@link org.apache.flink.streaming.api.graph.StreamingJobGraphGenerator#isChainable} refuses
-     * to chain two operators in different slot sharing groups, so giving the offloaded Calc a group
-     * of its own severs it from its source -- and every workload measured here is bound by reading
-     * that source, so the shuffle would cost more than the placement wins. Naming a distinct group
-     * is the finer-grained option and is available to anyone who has measured that trade for their
-     * own query.
+     * <p>It would be better if it could. {@code StreamingJobGraphGenerator#isChainable} refuses to
+     * chain two operators in different slot sharing groups, so a group of its own severs the
+     * offloaded Calc from its source, and every workload measured here is bound by reading that
+     * source. Attaching the requirement to the region everything already shares would cost nothing.
+     *
+     * <p>Flink does not allow it. In {@code setSlotSharingAndCoLocation}, a vertex whose group is
+     * the default name takes the <em>region</em> slot sharing group and the resource registered
+     * under that name is never consulted; only the branch for a named group calls {@code
+     * streamGraph.getSlotSharingGroupResource(k)}. Registering resources for {@code default} is
+     * therefore not a weaker requirement, it is silently no requirement at all -- so this rejects
+     * that name rather than accepting a setting that does nothing.
      */
+    public static final String DEFAULT_SLOT_SHARING_GROUP_NAME = "default";
+
     public static final ConfigOption<String> DEVICE_SLOT_SHARING_GROUP =
             ConfigOptions.key("table.exec.gpu-offload.device.slot-sharing-group")
                     .stringType()
-                    .defaultValue("default")
+                    .defaultValue("gpu-offload")
                     .withDescription(
-                            "Slot sharing group carrying the device requirement. The default "
-                                    + "applies it to the whole pipelined region, which keeps the "
-                                    + "offloaded node chained to its input; naming another group "
-                                    + "places the node alone and breaks that chain.");
+                            "Slot sharing group carrying the device requirement. Cannot be "
+                                    + "\"default\": Flink ignores resources registered for that "
+                                    + "name. Because the group must therefore be a distinct one, "
+                                    + "the offloaded node is no longer chained to its input.");
 
     public static final ConfigOption<String> DEVICE_RESOURCE_NAME =
             ConfigOptions.key("table.exec.gpu-offload.device.resource-name")
