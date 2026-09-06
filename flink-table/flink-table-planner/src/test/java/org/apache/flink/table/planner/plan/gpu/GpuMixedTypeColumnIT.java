@@ -47,7 +47,7 @@ class GpuMixedTypeColumnIT {
     void setUp() {
         tEnv = TableEnvironment.create(EnvironmentSettings.newInstance().inBatchMode().build());
         tEnv.executeSql(
-                "CREATE TABLE mixed (id BIGINT, i INT, f FLOAT, d DOUBLE) WITH ("
+                "CREATE TABLE mixed (id BIGINT, i INT, f FLOAT, d DOUBLE, b BOOLEAN) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '2000000')");
         tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
     }
@@ -101,6 +101,36 @@ class GpuMixedTypeColumnIT {
     }
 
     /**
+     * {@code BOOLEAN} is listed as a supported column type and is admitted nowhere.
+     *
+     * <p>Not as a kernel input -- the generator's whitelist is {@code DOUBLE}, {@code FLOAT},
+     * {@code REAL}, {@code INTEGER} -- and not as a projected-through column, which {@code
+     * canStage} restricts to the numeric four. A condition is boolean, which is presumably where
+     * the claim came from, but a boolean <em>column</em> has no way through.
+     */
+    @Test
+    @DisplayName("a BOOLEAN column is refused, despite being listed as supported")
+    void booleanColumnIsRefused() {
+        String plan =
+                tEnv.explainSql(
+                        "SELECT b, EXP(d) * LN(d) + SIN(d) * COS(d) + POWER(d, 3.0) AS h "
+                                + "FROM mixed");
+        String section = plan.substring(plan.indexOf("== GPU Offload =="));
+        assertTrue(section.contains("CPU"), "expected a refusal:\n" + section);
+    }
+
+    @Test
+    @DisplayName("and filtering on one is refused too")
+    void booleanConditionIsRefused() {
+        String plan =
+                tEnv.explainSql(
+                        "SELECT EXP(d) * LN(d) + SIN(d) * COS(d) + POWER(d, 3.0) AS h "
+                                + "FROM mixed WHERE b");
+        String section = plan.substring(plan.indexOf("== GPU Offload =="));
+        assertTrue(section.contains("CPU"), "expected a refusal:\n" + section);
+    }
+
+    /**
      * The staging path can now write a {@code FLOAT} result, and nothing reaches it.
      *
      * <p>Two independent things stand in the way, and only one of them was the buffer. The cost
@@ -139,6 +169,7 @@ class GpuMixedTypeColumnIT {
                     "SELECT id, f * f AS sq FROM mixed",
                     "SELECT f, EXP(d) * LN(d) + SIN(d) * COS(d) + POWER(d, 3.0) AS h FROM mixed",
                     "SELECT id, CAST(EXP(d) * LN(d) + SIN(d) * COS(d) + POWER(d, 3.0) AS FLOAT) AS h FROM mixed",
+                    "SELECT b, EXP(d) * LN(d) + SIN(d) * COS(d) + POWER(d, 3.0) AS h FROM mixed",
                 }) {
             String plan = tEnv.explainSql(sql);
             System.out.println("---------- " + sql);
