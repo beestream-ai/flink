@@ -127,9 +127,20 @@ public final class MixedTypeVerification {
                         + "FROM (SELECT "
                         + expression
                         + " AS h FROM Mixed)";
-        if (args.explain && gpu) {
+        if (gpu) {
+            // Checked on every run, not only under --explain. An agreement between the arms is
+            // evidence of nothing unless this arm actually reached a device, and the way that goes
+            // wrong is silent: the estimator declines, the query runs on the CPU, and the two
+            // arms match each other perfectly.
             String plan = env.explainSql(query);
-            System.out.println(plan.substring(plan.indexOf("== GPU Offload ==")));
+            String section = plan.substring(plan.indexOf("== GPU Offload =="));
+            if (args.explain) {
+                System.out.println(section);
+            }
+            if (!section.contains("GPU  subtree")) {
+                throw new IllegalStateException(
+                        "this arm did not offload, so comparing it proves nothing:\n" + section);
+            }
         }
         try (CloseableIterator<Row> rows = env.sqlQuery(query).execute().collect()) {
             if (!rows.hasNext()) {
