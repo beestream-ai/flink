@@ -31,6 +31,8 @@ import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.plan.fusion.OpFusionCodegenSpecGenerator;
 import org.apache.flink.table.planner.plan.fusion.generator.OneInputOpFusionCodegenSpecGenerator;
 import org.apache.flink.table.planner.plan.fusion.spec.HashAggFusionCodegenSpec;
+import org.apache.flink.table.planner.plan.gpu.GpuAggregateSupport;
+import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase;
@@ -227,6 +229,36 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
                 inputTransform.getParallelism(),
                 managedMemory,
                 false);
+    }
+
+    /**
+     * Offloadable when this is an ungrouped contraction the device has a primitive for.
+     *
+     * <p>Only the <em>local</em> half is worth taking. A batch aggregate is planned as a partial
+     * aggregate per subtask, an exchange, and a final merge; the partial is the contraction over
+     * rows, which is what a device does well, while the final merge sees one row per subtask and
+     * would be pure overhead. {@code isFinal} distinguishes them, and {@code isMerge} excludes a
+     * node that consumes partials rather than rows.
+     */
+    @Override
+    public boolean supportGpuOffload() {
+        return !isMerge && !isFinal;
+    }
+
+    /**
+     * Costs the contraction, which is deliberately cheap.
+     *
+     * <p>An aggregate alone never clears the offload floor and should not: contracting a row is a
+     * multiply and an add. What makes the pair worth offloading is the <code>Calc</code> beneath
+     * it, and the processor sums a subtree's costs precisely so a cheap contraction rides along
+     * with the expensive expression feeding it rather than being judged on its own.
+     */
+    @Override
+    public RowCost estimateRowCost() {
+        if (isMerge || isFinal) {
+            return RowCost.ineligible("only the partial aggregate contracts rows");
+        }
+        return GpuAggregateSupport.estimate(grouping, auxGrouping, aggCalls);
     }
 
     @Override

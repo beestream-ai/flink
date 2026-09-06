@@ -128,7 +128,7 @@ class BatchPhysicalLocalHashAggregate(
   }
 
   override def translateToExecNode(): ExecNode[_] = {
-    new BatchExecHashAggregate(
+    val execNode = new BatchExecHashAggregate(
       unwrapTableConfig(this),
       grouping,
       auxGrouping,
@@ -140,6 +140,12 @@ class BatchPhysicalLocalHashAggregate(
       getInputProperty,
       FlinkTypeFactory.toLogicalRowType(getRowType),
       getRelDetailedDescription)
+    // As BatchPhysicalCalc: the cardinality has to cross into the ExecNode graph here, because an
+    // ExecNode has no metadata query once translation is done. Note this is the estimate for the
+    // aggregate's own output -- one row -- so the input's count is what the offload decision wants
+    // and it reads that from the Calc it is grouped with.
+    execNode.setEstimatedRowCount(getCluster.getMetadataQuery.getRowCount(getInput))
+    execNode
   }
 
   private def getInputProperty: InputProperty = {
