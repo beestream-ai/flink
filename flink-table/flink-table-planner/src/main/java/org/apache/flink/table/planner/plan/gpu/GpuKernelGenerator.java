@@ -129,6 +129,22 @@ public final class GpuKernelGenerator {
      */
     public static Optional<GpuKernelSource> generate(
             List<RexNode> projection, @Nullable RexNode condition, String classNameSuffix) {
+        return generate(projection, condition, classNameSuffix, 0);
+    }
+
+    /**
+     * As above, optionally writing every computed column into one buffer.
+     *
+     * <p>{@code packedStride} rows apart, column-major, so column <em>j</em> of row <em>i</em> is
+     * at {@code j * packedStride + i}. Used by aggregate fusion, where a buffer per column would
+     * mean a reduction task per column and a graph TornadoVM refuses to build past about a hundred
+     * tasks. Zero keeps the per-column arrays the Calc operator expects.
+     */
+    public static Optional<GpuKernelSource> generate(
+            List<RexNode> projection,
+            @Nullable RexNode condition,
+            String classNameSuffix,
+            int packedStride) {
 
         // Only referenced columns are staged; a projected-through column stays on the host.
         final Map<Integer, String> inputs = new LinkedHashMap<>();
@@ -184,6 +200,15 @@ public final class GpuKernelGenerator {
         for (int i = 0; i < inputFields.length; i++) {
             stagedTypes[i] = inputTypes.get(inputFields[i]);
         }
+        if (packedStride > 0) {
+            for (GpuValueType type : outputTypes) {
+                if (type != GpuValueType.DOUBLE) {
+                    // One buffer means one element type, and the contraction that reads it
+                    // accumulates in double. A narrower column would need its own buffer again.
+                    return Optional.empty();
+                }
+            }
+        }
         String source =
                 renderClass(
                         className,
@@ -192,7 +217,8 @@ public final class GpuKernelGenerator {
                         inputTypes,
                         computed,
                         outputTypes,
-                        renderedCondition);
+                        renderedCondition,
+                        packedStride);
         return Optional.of(
                 new GpuKernelSource(
                         className,
@@ -202,7 +228,8 @@ public final class GpuKernelGenerator {
                         stagedTypes,
                         outputTypes.toArray(new GpuValueType[0]),
                         renderedCondition != null,
-                        layout));
+                        layout,
+                        packedStride));
     }
 
     private static String renderClass(
@@ -212,7 +239,8 @@ public final class GpuKernelGenerator {
             Map<Integer, GpuValueType> inputTypes,
             List<String> computed,
             List<GpuValueType> outputTypes,
-            @Nullable String condition) {
+            @Nullable String condition,
+            int packedStride) {
 
         // Only the array classes this kernel actually mentions, so the generated source names
         // nothing it does not use. IntArray is separate: a filter needs it for the mask whether or
@@ -221,8 +249,12 @@ public final class GpuKernelGenerator {
         for (GpuValueType type : inputTypes.values()) {
             arrayTypes.add(type.arrayType());
         }
-        for (GpuValueType type : outputTypes) {
-            arrayTypes.add(type.arrayType());
+        if (packedStride > 0) {
+            arrayTypes.add(GpuValueType.DOUBLE.arrayType());
+        } else {
+            for (GpuValueType type : outputTypes) {
+                arrayTypes.add(type.arrayType());
+            }
         }
         if (condition != null) {
             arrayTypes.add(GpuValueType.INT.arrayType());
@@ -244,8 +276,12 @@ public final class GpuKernelGenerator {
         for (Map.Entry<Integer, String> input : inputs.entrySet()) {
             params.add(inputTypes.get(input.getKey()).arrayType() + " " + input.getValue() + "_in");
         }
-        for (int i = 0; i < computed.size(); i++) {
-            params.add(outputTypes.get(i).arrayType() + " out" + i);
+        if (packedStride > 0) {
+            params.add("DoubleArray out");
+        } else {
+            for (int i = 0; i < computed.size(); i++) {
+                params.add(outputTypes.get(i).arrayType() + " out" + i);
+            }
         }
         if (condition != null) {
             params.add("IntArray mask");
@@ -267,6 +303,18 @@ public final class GpuKernelGenerator {
                     .append("_in.get(i);\n");
         }
         for (int i = 0; i < computed.size(); i++) {
+            if (packedStride > 0) {
+                // Column-major into one buffer. The stride is a literal rather than a parameter
+                // because the batch size is known here, and a constant is one less thing for the
+                // device compiler to be given at run time.
+                sb.append(INDENT)
+                        .append("    out.set(")
+                        .append(i * packedStride)
+                        .append(" + i, ")
+                        .append(computed.get(i))
+                        .append(");\n");
+                continue;
+            }
             // A FLOAT result is narrowed here rather than on the host, so the value that crosses
             // the bus is the one the row type declares and the buffer is half the size.
             boolean narrow = outputTypes.get(i) == GpuValueType.FLOAT;

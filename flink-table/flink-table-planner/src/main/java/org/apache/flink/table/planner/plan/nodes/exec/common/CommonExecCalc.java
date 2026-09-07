@@ -227,7 +227,17 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
 
     /** This Calc's expressions as a device kernel, or empty if they cannot be generated. */
     public Optional<GpuKernelSource> gpuKernel() {
-        return GpuKernelGenerator.generate(projection, condition, Integer.toString(getId()));
+        return gpuKernel(0);
+    }
+
+    /**
+     * As above, optionally packing every computed column into one buffer {@code packedStride} rows
+     * apart -- which is what aggregate fusion needs, so that contracting <em>k</em> columns is one
+     * task rather than <em>k</em>.
+     */
+    public Optional<GpuKernelSource> gpuKernel(int packedStride) {
+        return GpuKernelGenerator.generate(
+                projection, condition, Integer.toString(getId()), packedStride);
     }
 
     /**

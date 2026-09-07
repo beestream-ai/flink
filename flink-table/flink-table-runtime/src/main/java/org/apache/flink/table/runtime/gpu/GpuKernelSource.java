@@ -44,6 +44,7 @@ public final class GpuKernelSource implements Serializable {
     private final GpuValueType[] inputTypes;
     private final GpuValueType[] outputTypes;
     private final int outputCount;
+    private final int packedStride;
     private final boolean hasFilter;
     private final int[] outputLayout;
 
@@ -56,6 +57,28 @@ public final class GpuKernelSource implements Serializable {
             GpuValueType[] outputTypes,
             boolean hasFilter,
             int[] outputLayout) {
+        this(
+                className,
+                methodName,
+                source,
+                inputFieldIndexes,
+                inputTypes,
+                outputTypes,
+                hasFilter,
+                outputLayout,
+                0);
+    }
+
+    public GpuKernelSource(
+            String className,
+            String methodName,
+            String source,
+            int[] inputFieldIndexes,
+            GpuValueType[] inputTypes,
+            GpuValueType[] outputTypes,
+            boolean hasFilter,
+            int[] outputLayout,
+            int packedStride) {
         if (inputFieldIndexes.length != inputTypes.length) {
             throw new IllegalArgumentException(
                     "every staged column needs a declared type: "
@@ -71,6 +94,7 @@ public final class GpuKernelSource implements Serializable {
         this.inputTypes = inputTypes;
         this.outputTypes = outputTypes;
         this.outputCount = outputTypes.length;
+        this.packedStride = packedStride;
         this.hasFilter = hasFilter;
         this.outputLayout = outputLayout;
     }
@@ -115,6 +139,20 @@ public final class GpuKernelSource implements Serializable {
      */
     public GpuValueType[] outputTypes() {
         return outputTypes;
+    }
+
+    /**
+     * Row stride when the kernel writes every output column into one buffer, or 0 when it writes a
+     * buffer per column.
+     *
+     * <p>Packing exists so a contraction over <em>k</em> columns is one task rather than
+     * <em>k</em>. A task takes a fixed argument list, so <em>k</em> separate output arrays force
+     * <em>k</em> separate reductions -- which stops working: 136 sums is a 137-task graph and
+     * TornadoVM answers {@code Tornado Graph resize not implemented yet}. One matrix, column-major
+     * with this stride, is one task at any width, and is also the layout a GEMV would want.
+     */
+    public int packedStride() {
+        return packedStride;
     }
 
     /** Number of computed output columns the kernel writes. */

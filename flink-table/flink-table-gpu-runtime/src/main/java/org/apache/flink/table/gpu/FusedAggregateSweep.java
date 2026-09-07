@@ -23,26 +23,30 @@ import org.apache.flink.table.runtime.gpu.GpuAggregateSpec;
 import org.apache.flink.table.runtime.gpu.GpuKernelSource;
 import org.apache.flink.table.runtime.gpu.GpuValueType;
 import org.apache.flink.table.types.logical.DoubleType;
+import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
-import java.util.Collections;
+import java.util.Arrays;
 
 /**
  * Drives {@link FusedAggregateEngine} directly, with no Flink around it.
  *
- * <p>Written because four hypotheses were tested against a cluster at a quarter of an hour each and
- * none was right. A hand-built approximation of the same graph -- two tasks, a generated kernel,
- * with and without an explicit grid -- runs correctly, so the fault is not the graph shape. This
- * runs the <em>actual engine</em> instead of something shaped like it, which is the only way to
- * tell an engine bug from a Flink one.
+ * <p>Written after four hypotheses were tested against a cluster at a quarter of an hour each and
+ * none was right. A hand-built approximation of the same graph ran correctly, so approximating the
+ * shape was not enough; this runs the actual engine, which is what found the fault -- the operator
+ * had been staging every row at position 0.
+ *
+ * <p>It now sweeps the number of contracted columns, because that is where the second failure was.
+ * A buffer per column meant a reduction task per column, and at 136 sums -- the gram query at
+ * sixteen feature columns -- TornadoVM answers {@code Tornado Graph resize not implemented yet}.
+ * Packed into one matrix the contraction is a single task at any width, and these widths say so.
  *
  * <pre>{@code
- * java @$TORNADO_SDK/tornado-argfile -cp <gpu-runtime>:<table-runtime>:<table-common>:<api> \
- *     org.apache.flink.table.gpu.FusedAggregateSweep
+ * java @$TORNADO_SDK/tornado-argfile -cp <classes> org.apache.flink.table.gpu.FusedAggregateSweep
  * }</pre>
  *
- * <p>Every row is 1.0, so the sum is the row count and any shortfall says immediately how much of
- * the buffer was actually reduced.
+ * <p>Every staged row is 1.0 and column <em>j</em> is {@code c0 * (j + 1)}, so column <em>j</em>
+ * must sum to {@code (j + 1) * rows} and any shortfall says how much of the buffer was reduced.
  */
 public final class FusedAggregateSweep {
 
@@ -51,19 +55,40 @@ public final class FusedAggregateSweep {
 
     private FusedAggregateSweep() {}
 
-    /** {@code SELECT SUM(c0 * 2.0)}: one staged column, one projected column, no filter. */
-    private static GpuAggregateSpec spec() {
+    private static GpuAggregateSpec spec(int columns) {
+        StringBuilder writes = new StringBuilder();
+        for (int j = 0; j < columns; j++) {
+            writes.append("            out.set(")
+                    .append(j * BATCH)
+                    .append(" + i, (c0 * ")
+                    .append(j + 1)
+                    .append(".0));\n");
+        }
         String source =
                 "import uk.ac.manchester.tornado.api.annotations.Parallel;\n"
                         + "import uk.ac.manchester.tornado.api.types.arrays.DoubleArray;\n\n"
                         + "public final class GpuCalcKernel$Sweep {\n\n"
-                        + "    public static void evaluate(DoubleArray c0_in, DoubleArray out0) {\n"
+                        + "    public static void evaluate(DoubleArray c0_in, DoubleArray out) {\n"
                         + "        for (@Parallel int i = 0; i < c0_in.getSize(); i++) {\n"
                         + "            double c0 = c0_in.get(i);\n"
-                        + "            out0.set(i, (c0 * 2.0));\n"
+                        + writes
                         + "        }\n"
                         + "    }\n"
                         + "}\n";
+
+        GpuValueType[] outputs = new GpuValueType[columns];
+        Arrays.fill(outputs, GpuValueType.DOUBLE);
+        int[] layout = new int[columns];
+        Arrays.fill(layout, -1);
+        int[] sums = new int[columns];
+        LogicalType[] fields = new LogicalType[columns];
+        String[] names = new String[columns];
+        for (int j = 0; j < columns; j++) {
+            sums[j] = j;
+            fields[j] = new DoubleType();
+            names[j] = "f" + j;
+        }
+
         GpuKernelSource kernel =
                 new GpuKernelSource(
                         "GpuCalcKernel$Sweep",
@@ -71,42 +96,38 @@ public final class FusedAggregateSweep {
                         source,
                         new int[] {0},
                         new GpuValueType[] {GpuValueType.DOUBLE},
-                        new GpuValueType[] {GpuValueType.DOUBLE},
+                        outputs,
                         false,
-                        new int[] {-1});
-        RowType calcOut =
-                RowType.of(
-                        new org.apache.flink.table.types.logical.LogicalType[] {new DoubleType()},
-                        new String[] {"h"});
-        RowType out =
-                RowType.of(
-                        new org.apache.flink.table.types.logical.LogicalType[] {new DoubleType()},
-                        new String[] {"sum"});
-        return new GpuAggregateSpec(kernel, new int[] {0}, calcOut, out, BATCH, 100);
+                        layout,
+                        BATCH);
+        RowType row = RowType.of(fields, names);
+        return new GpuAggregateSpec(kernel, sums, row, row, BATCH, 100);
     }
 
     public static void main(String[] args) throws Exception {
-        GpuAggregateSpec spec = spec();
-        System.out.println("canContract=" + FusedAggregateEngine.canContract(spec));
-
-        try (FusedAggregateEngine engine = new FusedAggregateEngine(spec)) {
-            engine.open();
-            for (int i = 0; i < ROWS; i++) {
-                engine.inputColumn(0).set(i % BATCH, 1.0);
-                engine.rowComplete();
+        for (int columns : new int[] {1, 8, 36, 136, 256}) {
+            try (FusedAggregateEngine engine = new FusedAggregateEngine(spec(columns))) {
+                engine.open();
+                for (int i = 0; i < ROWS; i++) {
+                    engine.inputColumn(0).set(engine.position(), 1.0);
+                    engine.rowComplete();
+                }
+                engine.flush();
+                int wrong = 0;
+                for (int j = 0; j < columns; j++) {
+                    if (engine.total(j) != (j + 1.0) * ROWS) {
+                        wrong++;
+                    }
+                }
+                System.out.printf(
+                        "columns=%3d  first=%.1f last=%.1f  %s%n",
+                        columns,
+                        engine.total(0),
+                        engine.total(columns - 1),
+                        wrong == 0 ? "OK" : wrong + " of " + columns + " WRONG");
+            } catch (Exception e) {
+                System.out.printf("columns=%3d  FAILED: %s%n", columns, e);
             }
-            engine.flush();
-            double got = engine.total(0);
-            double want = 2.0 * ROWS;
-            System.out.printf(
-                    "rows=%d staged=%d contributed=%d total=%.1f want=%.1f  %s%n",
-                    ROWS,
-                    engine.stagedRows(),
-                    engine.contributingRows(),
-                    got,
-                    want,
-                    got == want ? "OK" : "WRONG, reduced " + (got / 2.0) + " rows");
         }
-        Collections.emptyList();
     }
 }

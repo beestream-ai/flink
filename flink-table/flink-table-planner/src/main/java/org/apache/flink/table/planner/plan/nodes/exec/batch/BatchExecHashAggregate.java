@@ -302,7 +302,10 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         if (fusedCalc == null) {
             return aggregateFactory;
         }
-        Optional<GpuKernelSource> kernel = fusedCalc.gpuKernel();
+        // Packed, so the contraction is one task at any width. The stride is the batch size,
+        // which is known here and becomes a literal in the generated source.
+        int batchSize = planner.getTableConfig().get(GpuOffloadOptions.BATCH_SIZE);
+        Optional<GpuKernelSource> kernel = fusedCalc.gpuKernel(batchSize);
         if (!kernel.isPresent()) {
             recordFallback("the fused Calc's expressions cannot be generated as a device kernel");
             return chainedOnly(planner, config, fusedCalc, inputTransform, aggregateFactory);
@@ -318,7 +321,7 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
                         sumSources,
                         (RowType) fusedCalc.getOutputType(),
                         (RowType) getOutputType(),
-                        planner.getTableConfig().get(GpuOffloadOptions.BATCH_SIZE),
+                        batchSize,
                         getGpuOffloadAssignment().verdict().rowCost());
         return new GpuOrCpuAggregateOperatorFactory(
                 spec, calcFactoryFor(planner, config, fusedCalc, inputTransform), aggregateFactory);

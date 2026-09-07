@@ -114,13 +114,24 @@ public final class FusedAggregateEngine implements AutoCloseable {
     private Object[] inputs;
 
     /** The Calc's outputs, which the contraction reads without them leaving the device. */
-    private DoubleArray[] projected;
+    /**
+     * The Calc's outputs as one column-major matrix, read in place by the contraction.
+     *
+     * <p>One buffer rather than one per column, because a task's argument list is fixed and
+     * <em>k</em> buffers force <em>k</em> reduction tasks. That stops working: sixteen feature
+     * columns make the gram query 136 sums, and a 137-task graph gets {@code Tornado Graph resize
+     * not implemented yet}. One matrix is one task at any width, and is the layout a GEMV wants.
+     */
+    private DoubleArray projected;
 
     /** 0/1 per row when the Calc has a condition; all ones when it does not. */
     private IntArray mask;
 
     /** {@link #PARTIALS} partial sums per contracted column. */
-    private DoubleArray[] partials;
+    private DoubleArray partials;
+
+    /** Which Calc output column each contracted slot came from, fixed at open. */
+    private int[] contractedColumns;
 
     private final double[] totals;
     private long contributingRows;
@@ -160,30 +171,22 @@ public final class FusedAggregateEngine implements AutoCloseable {
         for (int i = 0; i < inputs.length; i++) {
             inputs[i] = GeneratedKernel.allocate(source.inputTypes()[i], batchSize);
         }
-        projected = new DoubleArray[source.outputCount()];
-        for (int i = 0; i < projected.length; i++) {
-            projected[i] = new DoubleArray(batchSize);
-            projected[i].init(0.0);
-        }
+        projected = new DoubleArray(batchSize * source.outputCount());
+        projected.init(0.0);
         mask = new IntArray(batchSize);
         mask.init(1);
 
         int[] contracted = contractedColumns();
-        partials = new DoubleArray[contracted.length];
-        for (int i = 0; i < partials.length; i++) {
-            partials[i] = new DoubleArray(PARTIALS);
-            partials[i].init(0.0);
-        }
+        contractedColumns = contracted;
+        partials = new DoubleArray(contracted.length * PARTIALS);
+        partials.init(0.0);
 
-        Object[] kernelArgs =
-                new Object[inputs.length + projected.length + (source.hasFilter() ? 1 : 0)];
+        Object[] kernelArgs = new Object[inputs.length + 1 + (source.hasFilter() ? 1 : 0)];
         int at = 0;
         for (Object in : inputs) {
             kernelArgs[at++] = in;
         }
-        for (DoubleArray out : projected) {
-            kernelArgs[at++] = out;
-        }
+        kernelArgs[at++] = projected;
         if (source.hasFilter()) {
             kernelArgs[at] = mask;
         }
@@ -198,64 +201,62 @@ public final class FusedAggregateEngine implements AutoCloseable {
                         // TornadoVM wants every task parameter named in a transfer list, and an
                         // intermediate that appears in no list is not a buffer it has agreed to
                         // keep. Leaving these out is the likeliest cause of the wrong sum.
-                        .transferToDevice(DataTransferMode.EVERY_EXECUTION, (Object[]) projected)
+                        .transferToDevice(DataTransferMode.EVERY_EXECUTION, projected)
                         .task("project", entry, kernelArgs);
         // One reduction task per contracted column, all reading buffers the projection just wrote.
         // They could be one task over a matrix if the columns were adjacent in memory; they are
         // separate arrays because the projection writes them separately, and k is small.
-        for (int i = 0; i < contracted.length; i++) {
-            graph =
-                    graph.task(
-                            "sum" + i,
-                            FusedAggregateEngine::sumChunks,
-                            projected[contracted[i]],
-                            mask,
-                            partials[i],
-                            PARTIALS,
-                            chunkSizeFor(batchSize));
-        }
-        if (DIAGNOSE_FIRST_BATCH) {
-            // Bring the projection's own output back, purely to see it. Two kernel shapes whose
-            // threads read disjoint index sets returned an identical partial, which can only mean
-            // one element of this buffer is non-zero -- so the question is whether the projection
-            // wrote one element, or the contraction is reading a buffer the projection never
-            // touched. Counting non-zeros here answers it and costs one copy on a debug build.
-            graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, projected[0]);
-        }
-        graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, (Object[]) partials);
+        graph =
+                graph.task(
+                        "sum",
+                        FusedAggregateEngine::sumMatrix,
+                        projected,
+                        mask,
+                        partials,
+                        contracted.length * PARTIALS,
+                        PARTIALS,
+                        chunkSizeFor(batchSize),
+                        batchSize);
+        graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, projected, partials);
+
         // Every task's iteration space, stated rather than inferred.
-        //
-        // This is the whole bug. The projection kernel is the same generated source the Calc
-        // operator runs correctly on its own, and in this graph it wrote exactly one element of
-        // 262,144 -- a one-thread grid, so only iteration zero ran. Three fixes downstream of that
-        // changed nothing, because nothing downstream was wrong. A graph of several tasks with
-        // different natural widths gives TornadoVM nothing to infer from, and a GridScheduler is
-        // how it is told instead of guessed at.
         GridScheduler grid = new GridScheduler();
         grid.addWorkerGrid("fused-aggregate.project", new WorkerGrid1D(batchSize));
-        for (int i = 0; i < contracted.length; i++) {
-            grid.addWorkerGrid("fused-aggregate.sum" + i, new WorkerGrid1D(PARTIALS));
-        }
+        grid.addWorkerGrid("fused-aggregate.sum", new WorkerGrid1D(contracted.length * PARTIALS));
         plan = new TornadoExecutionPlan(graph.snapshot()).withGridScheduler(grid);
     }
 
     /**
-     * Sums one column, {@link #PARTIALS} threads striding through it.
+     * Sums every contracted column of the projected matrix, in one task.
      *
-     * <p>The stride is the thread count rather than a contiguous block per thread, so the threads
-     * of a warp read adjacent addresses on every step. Masked-out rows contribute zero rather than
-     * being skipped, because a branch that changes the iteration count would diverge the warp for
-     * no saving.
+     * <p>One task rather than one per column, which is the difference between working and not. A
+     * task's argument list is fixed, so a buffer per column forces a reduction per column, and at
+     * sixteen feature columns the gram query is 136 sums -- a 137-task graph, which TornadoVM
+     * refuses with {@code Tornado Graph resize not implemented yet}. Here the thread index carries
+     * both coordinates: column {@code t / chunks}, chunk {@code t % chunks}.
+     *
+     * <p>Masked rows contribute zero rather than being skipped, so no branch diverges a warp, and
+     * the mask is indexed by row within the batch while the matrix is indexed by column-major
+     * offset.
      */
-    public static void sumChunks(
-            DoubleArray column, IntArray mask, DoubleArray partials, int chunks, int chunkSize) {
-        for (@Parallel int c = 0; c < chunks; c++) {
+    public static void sumMatrix(
+            DoubleArray matrix,
+            IntArray mask,
+            DoubleArray partials,
+            int threads,
+            int chunks,
+            int chunkSize,
+            int rows) {
+        for (@Parallel int t = 0; t < threads; t++) {
+            int column = t / chunks;
+            int chunk = t - column * chunks;
+            int row = chunk * chunkSize;
+            int start = column * rows + row;
             double acc = 0.0;
-            int start = c * chunkSize;
             for (int i = 0; i < chunkSize; i++) {
-                acc += column.get(start + i) * mask.get(start + i);
+                acc += matrix.get(start + i) * mask.get(row + i);
             }
-            partials.set(c, acc);
+            partials.set(t, acc);
         }
     }
 
@@ -321,51 +322,12 @@ public final class FusedAggregateEngine implements AutoCloseable {
                         throw new IllegalStateException("fused aggregate execution failed", e);
                     }
                 });
-        for (int column = 0; column < partials.length; column++) {
+        for (int column = 0; column < contractedColumns.length; column++) {
             double sum = 0.0;
             for (int c = 0; c < PARTIALS; c++) {
-                sum += partials[column].get(c);
+                sum += partials.get(column * PARTIALS + c);
             }
             totals[column] += sum;
-            if (DIAGNOSE_FIRST_BATCH && !diagnosed && column == 0) {
-                int nonZero = 0;
-                int lastNonZero = -1;
-                for (int c = 0; c < PARTIALS; c++) {
-                    if (partials[column].get(c) != 0.0) {
-                        nonZero++;
-                        lastNonZero = c;
-                    }
-                }
-                // How many threads wrote, and what one of them accumulated. A single non-zero
-                // partial means one thread ran; 1024 tiny ones mean every thread summed a single
-                // element; 1024 large ones mean the reduction worked and the fault is elsewhere.
-                int projectedNonZero = 0;
-                int projectedLast = -1;
-                for (int i = 0; i < batchSize; i++) {
-                    if (projected[0].get(i) != 0.0) {
-                        projectedNonZero++;
-                        projectedLast = i;
-                    }
-                }
-                LOG.info(
-                        "fused aggregate first batch: {} of {} partials non-zero, last at {}, "
-                                + "partial[0]={}, batch sum={}, rows staged={}; "
-                                + "projected column 0: {} of {} non-zero, last at {}, "
-                                + "[0]={}, [1]={}, [255]={}",
-                        nonZero,
-                        PARTIALS,
-                        lastNonZero,
-                        partials[column].get(0),
-                        sum,
-                        buffered,
-                        projectedNonZero,
-                        batchSize,
-                        projectedLast,
-                        projected[0].get(0),
-                        projected[0].get(1),
-                        projected[0].get(255));
-                diagnosed = true;
-            }
         }
         for (int i = 0; i < buffered; i++) {
             if (mask.get(i) != 0) {
