@@ -33,6 +33,8 @@ import uk.ac.manchester.tornado.api.annotations.Parallel;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.types.arrays.DoubleArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
+import uk.ac.manchester.tornado.cublas.CuBlas;
+import uk.ac.manchester.tornado.cublas.enums.CuBlasOperation;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -130,6 +132,15 @@ public final class FusedAggregateEngine implements AutoCloseable {
     /** {@link #PARTIALS} partial sums per contracted column. */
     private DoubleArray partials;
 
+    /**
+     * The vector the contraction multiplies by: 1.0 for a row that counts, 0.0 otherwise.
+     *
+     * <p>This is where the mask goes. {@code SUM} over the rows a filter kept is {@code weights' M}
+     * with the filter in {@code weights}, so a masked row contributes zero through the arithmetic
+     * rather than a branch, and the library call needs no notion of masking at all.
+     */
+    private DoubleArray weights;
+
     /** Which Calc output column each contracted slot came from, fixed at open. */
     private int[] contractedColumns;
 
@@ -175,10 +186,12 @@ public final class FusedAggregateEngine implements AutoCloseable {
         projected.init(0.0);
         mask = new IntArray(batchSize);
         mask.init(1);
+        weights = new DoubleArray(batchSize);
+        weights.init(1.0);
 
         int[] contracted = contractedColumns();
         contractedColumns = contracted;
-        partials = new DoubleArray(contracted.length * PARTIALS);
+        partials = new DoubleArray(contracted.length);
         partials.init(0.0);
 
         Object[] kernelArgs = new Object[inputs.length + 1 + (source.hasFilter() ? 1 : 0)];
@@ -194,7 +207,7 @@ public final class FusedAggregateEngine implements AutoCloseable {
         TaskGraph graph =
                 new TaskGraph("fused-aggregate")
                         .transferToDevice(DataTransferMode.EVERY_EXECUTION, inputs)
-                        .transferToDevice(DataTransferMode.EVERY_EXECUTION, mask)
+                        .transferToDevice(DataTransferMode.EVERY_EXECUTION, mask, weights)
                         // The projected columns never go to the host, but they still have to be
                         // declared. FeatureGramEngine -- which works -- declares the buffer its
                         // kernel writes and its library call then reads, for the same reason:
@@ -203,60 +216,45 @@ public final class FusedAggregateEngine implements AutoCloseable {
                         // keep. Leaving these out is the likeliest cause of the wrong sum.
                         .transferToDevice(DataTransferMode.EVERY_EXECUTION, projected)
                         .task("project", entry, kernelArgs);
-        // One reduction task per contracted column, all reading buffers the projection just wrote.
-        // They could be one task over a matrix if the columns were adjacent in memory; they are
-        // separate arrays because the projection writes them separately, and k is small.
+        if (source.hasFilter()) {
+            // Fold the device-computed mask into the weights, so the contraction stays a single
+            // library call that knows nothing about filtering.
+            graph = graph.task("mask", FusedAggregateEngine::applyMask, mask, weights);
+        }
+        // y = A' x: A is the rows-by-columns matrix the projection wrote, column-major, leading
+        // dimension the batch size; x is the weights. One call contracts every column at once,
+        // which is the fused multiple reduction @Reduce cannot express and k separate kernels
+        // could not scale to -- 136 of them is a graph TornadoVM refuses to build.
         graph =
-                graph.task(
+                graph.libraryTask(
                         "sum",
-                        FusedAggregateEngine::sumMatrix,
+                        CuBlas::cublasDgemv,
+                        CuBlasOperation.CUBLAS_OP_T.operation(),
+                        batchSize,
+                        contracted.length,
+                        1.0,
                         projected,
-                        mask,
+                        batchSize,
+                        weights,
+                        1,
+                        0.0,
                         partials,
-                        contracted.length * PARTIALS,
-                        PARTIALS,
-                        chunkSizeFor(batchSize),
-                        batchSize);
+                        1);
         graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, projected, partials);
 
         // Every task's iteration space, stated rather than inferred.
         GridScheduler grid = new GridScheduler();
         grid.addWorkerGrid("fused-aggregate.project", new WorkerGrid1D(batchSize));
-        grid.addWorkerGrid("fused-aggregate.sum", new WorkerGrid1D(contracted.length * PARTIALS));
+        if (source.hasFilter()) {
+            grid.addWorkerGrid("fused-aggregate.mask", new WorkerGrid1D(batchSize));
+        }
         plan = new TornadoExecutionPlan(graph.snapshot()).withGridScheduler(grid);
     }
 
-    /**
-     * Sums every contracted column of the projected matrix, in one task.
-     *
-     * <p>One task rather than one per column, which is the difference between working and not. A
-     * task's argument list is fixed, so a buffer per column forces a reduction per column, and at
-     * sixteen feature columns the gram query is 136 sums -- a 137-task graph, which TornadoVM
-     * refuses with {@code Tornado Graph resize not implemented yet}. Here the thread index carries
-     * both coordinates: column {@code t / chunks}, chunk {@code t % chunks}.
-     *
-     * <p>Masked rows contribute zero rather than being skipped, so no branch diverges a warp, and
-     * the mask is indexed by row within the batch while the matrix is indexed by column-major
-     * offset.
-     */
-    public static void sumMatrix(
-            DoubleArray matrix,
-            IntArray mask,
-            DoubleArray partials,
-            int threads,
-            int chunks,
-            int chunkSize,
-            int rows) {
-        for (@Parallel int t = 0; t < threads; t++) {
-            int column = t / chunks;
-            int chunk = t - column * chunks;
-            int row = chunk * chunkSize;
-            int start = column * rows + row;
-            double acc = 0.0;
-            for (int i = 0; i < chunkSize; i++) {
-                acc += matrix.get(start + i) * mask.get(row + i);
-            }
-            partials.set(t, acc);
+    /** Folds a 0/1 mask into the weight vector the contraction multiplies by. */
+    public static void applyMask(IntArray mask, DoubleArray weights) {
+        for (@Parallel int i = 0; i < weights.getSize(); i++) {
+            weights.set(i, weights.get(i) * mask.get(i));
         }
     }
 
@@ -313,6 +311,7 @@ public final class FusedAggregateEngine implements AutoCloseable {
     private void execute() throws Exception {
         for (int i = buffered; i < batchSize; i++) {
             mask.set(i, 0);
+            weights.set(i, 0.0);
         }
         withKernelLoader(
                 () -> {
@@ -323,11 +322,7 @@ public final class FusedAggregateEngine implements AutoCloseable {
                     }
                 });
         for (int column = 0; column < contractedColumns.length; column++) {
-            double sum = 0.0;
-            for (int c = 0; c < PARTIALS; c++) {
-                sum += partials.get(column * PARTIALS + c);
-            }
-            totals[column] += sum;
+            totals[column] += partials.get(column);
         }
         for (int i = 0; i < buffered; i++) {
             if (mask.get(i) != 0) {
@@ -336,6 +331,7 @@ public final class FusedAggregateEngine implements AutoCloseable {
         }
         if (buffered < batchSize) {
             mask.init(1);
+            weights.init(1.0);
         }
         buffered = 0;
     }
