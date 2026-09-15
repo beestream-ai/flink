@@ -32,9 +32,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The substitution seam: what happens when a node is selected but the machine cannot serve it.
  *
- * <p>Whether a given expression can be turned into a kernel is covered by {@link
- * GpuKernelGeneratorTest}. This is about the surrounding fallback, which has to be silent to the
- * query and correct in its results.
+ * <p>Whether a given expression can be turned into a kernel is covered by the provider module's
+ * {@code AccelKernelGeneratorTest}. This is about the surrounding fallback, which has to be silent
+ * to the query and correct in its results.
  *
  * <p>flink-table-planner has no dependency on the GPU runtime, so every job here runs on a JVM with
  * no provider on its classpath — the same position as a TaskManager without a GPU. The plan still

@@ -16,12 +16,10 @@
  * limitations under the License.
  */
 
-package org.apache.flink.table.runtime.gpu;
+package org.apache.flink.table.gpu.codegen;
 
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
-import org.apache.flink.table.accelerator.AccelNode;
-import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.types.logical.RowType;
 
 import javax.annotation.Nullable;
@@ -52,32 +50,20 @@ public final class GpuCalcSpec implements Serializable {
     private final int[] outputLayout;
     private final RowType outputType;
     private final int batchSize;
-    private final AccelWorkProfile work;
-    private final AccelNode subtree;
-    private final double minSpeedup;
 
     public GpuCalcSpec(
-            GpuKernelSource kernel,
-            int[] outputLayout,
-            RowType outputType,
-            int batchSize,
-            AccelWorkProfile work,
-            AccelNode subtree,
-            double minSpeedup) {
+            GpuKernelSource kernel, int[] outputLayout, RowType outputType, int batchSize) {
         this.kernel = kernel;
         this.outputLayout = outputLayout;
         this.outputType = outputType;
         this.batchSize = batchSize;
-        this.work = work;
-        this.subtree = subtree;
-        this.minSpeedup = minSpeedup;
     }
 
     /**
      * The pre-generated TornadoVM kernel, or null.
      *
-     * <p>Null is normal. It means only that the legacy generator could not express this Calc —
-     * a pure pass-through with a filter, for instance, which it refuses because it has no computed
+     * <p>Null is normal. It means only that the legacy generator could not express this Calc — a
+     * pure pass-through with a filter, for instance, which it refuses because it has no computed
      * column. That is a limitation of one provider's code generator and says nothing about whether
      * the subtree can be accelerated: a provider reading {@link #subtree()} may well serve it.
      * Gating the whole accelerator path on this was hiding otherwise-offloadable queries.
@@ -113,31 +99,6 @@ public final class GpuCalcSpec implements Serializable {
     /** Rows staged before each kernel launch, from {@code table.exec.gpu-offload.batch-size}. */
     public int batchSize() {
         return batchSize;
-    }
-
-    /**
-     * Work this subtree performs per row, counted per operation.
-     *
-     * <p>Carried so a provider can weigh it with its own device's costs. Flink does not weigh it:
-     * a weight table is a model of one accelerator.
-     */
-    public AccelWorkProfile work() {
-        return work;
-    }
-
-    /** What to run, in accelerator IR. Handed to a provider on the TaskManager. */
-    public AccelNode subtree() {
-        return subtree;
-    }
-
-    /**
-     * How much faster than the CPU a provider must claim to be before Flink prefers it.
-     *
-     * <p>Policy, not calibration: it means the same thing on every accelerator. Read from config
-     * on the client and shipped, so the TaskManager needs no access to the job's table config.
-     */
-    public double minSpeedup() {
-        return minSpeedup;
     }
 
     /**
@@ -183,8 +144,8 @@ public final class GpuCalcSpec implements Serializable {
                 + Arrays.toString(outputLayout)
                 + ", batch="
                 + batchSize
-                + ", work="
-                + work
+                + ", batch="
+                + batchSize
                 + "]";
     }
 }

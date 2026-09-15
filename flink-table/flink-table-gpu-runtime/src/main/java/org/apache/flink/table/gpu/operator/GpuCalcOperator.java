@@ -24,10 +24,10 @@ import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.gpu.codegen.GpuCalcSpec;
+import org.apache.flink.table.gpu.codegen.GpuValueType;
 import org.apache.flink.table.gpu.gather.RowGather;
 import org.apache.flink.table.gpu.metrics.OffloadMetrics;
-import org.apache.flink.table.runtime.gpu.GpuCalcSpec;
-import org.apache.flink.table.runtime.gpu.GpuValueType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 

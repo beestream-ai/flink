@@ -28,6 +28,7 @@ import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeServiceAware;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
 import org.apache.flink.table.runtime.accelerator.AcceleratorChoice;
 import org.apache.flink.table.runtime.accelerator.AcceleratorContext;
 import org.apache.flink.table.runtime.accelerator.AcceleratorProvider;
@@ -82,13 +83,13 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
 
     private static final Logger LOG = LoggerFactory.getLogger(GpuOrCpuCalcOperatorFactory.class);
 
-    private final GpuCalcSpec spec;
+    private final AcceleratedCalcSpec spec;
 
     /** What Flink would have built for this Calc, and what runs if the device is unavailable. */
     private final StreamOperatorFactory<RowData> cpuFactory;
 
     public GpuOrCpuCalcOperatorFactory(
-            GpuCalcSpec spec, StreamOperatorFactory<RowData> cpuFactory) {
+            AcceleratedCalcSpec spec, StreamOperatorFactory<RowData> cpuFactory) {
         this.spec = spec;
         this.cpuFactory = cpuFactory;
     }
@@ -124,8 +125,7 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
                     StreamOperatorFactory<RowData> built =
                             accelerator
                                     .get()
-                                    .createOperator(
-                                            outcome.plan().get(), contextFor(spec, loader));
+                                    .createOperator(outcome.plan().get(), contextFor(spec, loader));
                     built.setChainingStrategy(getChainingStrategy());
                     if (built instanceof ProcessingTimeServiceAware) {
                         ((ProcessingTimeServiceAware) built)
@@ -138,40 +138,15 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
                 return codeGenerated(parameters, outcome.reason());
             }
 
-            // The pre-SPI path, still here until the provider moves out of tree (task M1.1).
-            if (!spec.hasKernel()) {
-                return codeGenerated(
-                        parameters,
-                        "no accelerator provider, and the legacy path needs a generated kernel");
-            }
-            Optional<GpuOperatorFactoryProvider> provider =
-                    GpuOperatorFactoryProvider.find(loader);
-            if (!provider.isPresent()) {
-                return codeGenerated(
-                        parameters, "no accelerator provider on this TaskManager's classpath");
-            }
-            Optional<StreamOperatorFactory<RowData>> factory =
-                    provider.get().createCalcOperatorFactory(spec);
-            if (!factory.isPresent()) {
-                return codeGenerated(parameters, provider.get().describe() + " declined the spec");
-            }
-            StreamOperatorFactory<RowData> gpu = factory.get();
-            gpu.setChainingStrategy(getChainingStrategy());
-            if (gpu instanceof ProcessingTimeServiceAware) {
-                ((ProcessingTimeServiceAware) gpu).setProcessingTimeService(processingTimeService);
-            }
-            T operator = gpu.createStreamOperator(parameters);
-            LOG.info(
-                    "GPU offload active for {} on this TaskManager via {}",
-                    spec.kernel().methodName(),
-                    provider.get().describe());
-            return operator;
+            return codeGenerated(
+                    parameters, "no accelerator provider on this TaskManager's classpath");
         } catch (Throwable t) {
-            return codeGenerated(parameters, "accelerator operator could not be created (" + t + ")");
+            return codeGenerated(
+                    parameters, "accelerator operator could not be created (" + t + ")");
         }
     }
 
-    private static AcceleratorContext contextFor(GpuCalcSpec spec, ClassLoader loader) {
+    private static AcceleratorContext contextFor(AcceleratedCalcSpec spec, ClassLoader loader) {
         return new AcceleratorContext() {
             @Override
             public RowType outputType() {
@@ -180,7 +155,7 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
 
             @Override
             public int maxBatchSize() {
-                return spec.batchSize();
+                return spec.maxBatchSize();
             }
 
             @Override
@@ -193,8 +168,7 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
     private <T extends StreamOperator<RowData>> T codeGenerated(
             StreamOperatorParameters<RowData> parameters, String reason) {
         LOG.info(
-                "GPU offload declined on this TaskManager, running the generated CPU operator for {}: {}",
-                spec.kernel().methodName(),
+                "Accelerator declined on this TaskManager, running the generated CPU operator: {}",
                 reason);
         return cpuFactory.createStreamOperator(parameters);
     }
@@ -253,7 +227,7 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
     }
 
     /** The spec that would run on a device, for tests and for the operator's own reporting. */
-    public GpuCalcSpec spec() {
+    public AcceleratedCalcSpec spec() {
         return spec;
     }
 

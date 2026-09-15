@@ -54,10 +54,10 @@ import java.util.List;
  * match trivially. Two things must be in place, and the failure message names whichever is missing.
  *
  * <ul>
- *   <li>{@code flink-table-gpu-runtime} on the classpath. It registers a {@code
- *       GpuOperatorFactoryProvider} through {@code META-INF/services}; the planner discovers it
- *       with {@link java.util.ServiceLoader} and holds no compile-time reference to it. This module
- *       declares it at runtime scope, so it is present when run from the IDE.
+ *   <li>{@code flink-table-gpu-runtime} on the classpath. It registers an {@code
+ *       AcceleratorProvider} through {@code META-INF/services}; the TaskManager discovers it with
+ *       {@link java.util.ServiceLoader} and Flink holds no compile-time reference to it. This
+ *       module declares it at runtime scope, so it is present when run from the IDE.
  *   <li>TornadoVM's JVM arguments. They are not optional and are not inherited from the build:
  *       TornadoVM's off-heap array types use a preview API, so without {@code --enable-preview} and
  *       the JVMCI flags the runtime declines and the planner falls back.

@@ -27,21 +27,25 @@ import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.OperatorSnapshotFutures;
 import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.api.operators.StreamOperator;
+import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
+import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.api.operators.StreamTaskStateInitializer;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
 import org.apache.flink.streaming.runtime.streamrecord.RecordAttributes;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
+import org.apache.flink.streaming.runtime.tasks.ProcessingTimeServiceAware;
 import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
 import org.apache.flink.table.data.RowData;
 
 /**
  * Runs the code-generated {@code Calc} and the code-generated aggregate as one operator.
  *
- * <p>This is what a TaskManager without a device runs when the plan fused a {@code Calc} into the
- * aggregate above it. Fusing collapses two ExecNodes into one transformation, so the fallback can
- * no longer be "the operator Flink would have built" -- there were two of them. It is instead
- * <em>both</em> of them, wired together here.
+ * <p>This is what runs when the plan fused a {@code Calc} into the aggregate above it. Fusing
+ * collapses two ExecNodes into one transformation, so "the operator Flink would have built" is no
+ * longer a single thing -- there were two of them. It is instead <em>both</em> of them, wired
+ * together here.
  *
  * <p>Which is the point. The Calc path's fallback is strong because it does not merely resemble the
  * code-generated operator, it <em>is</em> the code-generated operator, and the sum it produces is
@@ -55,7 +59,7 @@ import org.apache.flink.table.data.RowData;
  * along the same path a real chain would take.
  */
 @Internal
-final class ChainedCalcAggregateOperator
+public final class ChainedCalcAggregateOperator
         implements OneInputStreamOperator<RowData, RowData>, BoundedOneInput {
 
     private final OneInputStreamOperator<RowData, RowData> calc;
@@ -66,6 +70,55 @@ final class ChainedCalcAggregateOperator
             OneInputStreamOperator<RowData, RowData> aggregate) {
         this.calc = calc;
         this.aggregate = aggregate;
+    }
+
+    /**
+     * Builds both operators on this TaskManager and wires the Calc's output into the aggregate.
+     *
+     * <p>The caller holds two factories and one set of {@link StreamOperatorParameters}. The
+     * aggregate is built against those parameters unchanged, because it is what emits downstream;
+     * the Calc is built against a copy whose output is {@link Forwarding} instead, so its records
+     * go to the aggregate. Substituting the output is the whole of the chaining -- neither
+     * generated operator is aware of the other.
+     *
+     * <p>The processing-time service is pushed into both factories first. Flink sets it on the
+     * outermost factory only, and {@code CodeGenOperatorFactory} reads its own field rather than
+     * the parameters, so a delegate that is never told sees null.
+     */
+    @SuppressWarnings("unchecked")
+    public static <T extends StreamOperator<RowData>> T chain(
+            StreamOperatorParameters<RowData> parameters,
+            StreamOperatorFactory<RowData> calcFactory,
+            StreamOperatorFactory<RowData> aggregateFactory,
+            ProcessingTimeService processingTimeService) {
+
+        propagate(aggregateFactory, processingTimeService);
+        propagate(calcFactory, processingTimeService);
+
+        OneInputStreamOperator<RowData, RowData> aggregate =
+                aggregateFactory.createStreamOperator(parameters);
+
+        Output<StreamRecord<RowData>> intoAggregate =
+                new Forwarding(aggregate, parameters.getOutput());
+        StreamOperatorParameters<RowData> calcParameters =
+                new StreamOperatorParameters<>(
+                        parameters.getContainingTask(),
+                        parameters.getStreamConfig(),
+                        intoAggregate,
+                        parameters::getProcessingTimeService,
+                        parameters.getOperatorEventDispatcher(),
+                        parameters.getMailboxExecutor());
+        OneInputStreamOperator<RowData, RowData> calc =
+                calcFactory.createStreamOperator(calcParameters);
+
+        return (T) new ChainedCalcAggregateOperator(calc, aggregate);
+    }
+
+    private static void propagate(
+            StreamOperatorFactory<RowData> factory, ProcessingTimeService service) {
+        if (factory instanceof ProcessingTimeServiceAware) {
+            ((ProcessingTimeServiceAware) factory).setProcessingTimeService(service);
+        }
     }
 
     /** Feeds one operator's output into the next, in place of the task's own output. */

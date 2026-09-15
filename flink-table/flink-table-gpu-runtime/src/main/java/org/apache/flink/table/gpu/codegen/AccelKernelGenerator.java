@@ -16,20 +16,20 @@
  * limitations under the License.
  */
 
-package org.apache.flink.table.planner.plan.gpu;
+package org.apache.flink.table.gpu.codegen;
 
-import org.apache.flink.table.runtime.gpu.GpuKernelSource;
-import org.apache.flink.table.runtime.gpu.GpuValueType;
-
-import org.apache.calcite.rex.RexCall;
-import org.apache.calcite.rex.RexInputRef;
-import org.apache.calcite.rex.RexLiteral;
-import org.apache.calcite.rex.RexNode;
-import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.flink.table.accelerator.AccelCall;
+import org.apache.flink.table.accelerator.AccelExpression;
+import org.apache.flink.table.accelerator.AccelFilter;
+import org.apache.flink.table.accelerator.AccelInputRef;
+import org.apache.flink.table.accelerator.AccelLiteral;
+import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.accelerator.AccelProject;
+import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
 
 import javax.annotation.Nullable;
 
-import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -42,50 +42,39 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Generates a TornadoVM kernel, as Java source, from a Calc's {@code RexNode} expressions.
+ * Generates a TornadoVM kernel, as Java source, from an accelerator IR subtree.
  *
- * <p>The generated method is compiled at run time and named to TornadoVM through {@code
- * TaskGraph.task(String, Method, Object...)}. Before that overload existed a kernel had to be a
- * method that already existed at compile time, which forced a fixed catalogue of shapes; this
- * removes that limit.
+ * <p>This lived in {@code flink-table-planner} and read {@code RexNode}s, which meant core Flink's
+ * planner emitted {@code uk.ac.manchester.tornado} imports. No amount of tidying fixes that: it is
+ * the wrong direction of dependency, and it is the single thing that would have stopped the
+ * extension point being proposed as a FLIP. It now reads Flink's device-neutral IR instead, and
+ * lives with the provider that owns the device.
  *
  * <h2>Storage follows the column, arithmetic does not</h2>
  *
  * <p>Each staged column is held at its declared width — {@code IntArray}, {@code FloatArray} or
  * {@code DoubleArray} — and widened to {@code double} on entry to the loop body, so the expression
  * is evaluated in double whatever it reads. Only the buffer and the transfer follow the column.
+ * Reading a four-byte field with {@code getDouble} reads eight: an {@code INT} column holding 42
+ * once reached the device as 2.08e-322.
  *
- * <p>This used to stage everything as {@code DoubleArray}, justified by {@code INTEGER} and {@code
- * FLOAT} both being exact in a double. They are; the argument was still wrong, because it was about
- * values and the gather is about layout. Reading a four-byte field with {@code getDouble} reads
- * eight bytes: an {@code INT} column holding 42 reached the device as 2.08e-322. A {@code FLOAT}
- * result had the mirror-image problem on the way out, boxing a {@code Double} into a field the row
- * type declares {@code FLOAT}.
- *
- * <p>The width is also worth having on its own: a {@code FLOAT} or {@code INT} column now moves
- * four bytes per row instead of eight, and every workload measured so far is bound by moving its
- * input.
- *
- * <p><b>{@code BIGINT} is deliberately excluded as an expression input.</b> Values beyond 2^53 do
- * not survive the round trip through a double, so admitting it would silently return different
- * answers from the CPU plan for large keys. A {@code BIGINT} column may still be selected: a
- * projected-through column never reaches the device and keeps its exact type.
+ * <p><b>{@code BIGINT} is excluded as an expression input.</b> Values beyond 2^53 do not survive
+ * the round trip through a double. A {@code BIGINT} column may still be projected through: it never
+ * reaches the device and keeps its exact type.
  *
  * <h2>Filtering does not compact</h2>
  *
- * <p>A condition becomes a 0/1 mask written alongside the projections rather than a compaction.
- * Compacting on the device needs a prefix sum and a scatter — two more kernels and another buffer —
- * whereas the host has to walk the results anyway to build output rows.
+ * <p>A condition becomes a 0/1 mask written alongside the projections. Compacting on the device
+ * needs a prefix sum and a scatter — two more kernels and another buffer — whereas the host has to
+ * walk the results anyway to build output rows.
  */
-public final class GpuKernelGenerator {
+public final class AccelKernelGenerator {
 
     /**
      * Words that are legal Java identifiers but reserved in OpenCL C.
      *
-     * <p>TornadoVM translates the generated Java into OpenCL, so a method or variable named after
-     * an OpenCL keyword fails late, inside the sketcher, with {@code "Java method name corresponds
-     * to an OpenCL Token"}. Generated names are checked against this list rather than left to
-     * produce that error.
+     * <p>TornadoVM translates the generated Java into OpenCL, so a name taken from this list fails
+     * late, inside the sketcher, with "Java method name corresponds to an OpenCL Token".
      */
     private static final Set<String> OPENCL_RESERVED =
             new HashSet<>(
@@ -108,68 +97,70 @@ public final class GpuKernelGenerator {
 
     private static final String INDENT = "        ";
 
-    /**
-     * Mirrors {@code GpuCalcSpec.COMPUTED}. Duplicated rather than imported so the generator has no
-     * reason to reach into the runtime module beyond the value object it produces.
-     */
-    private static final int OUTPUT_COMPUTED = -1;
+    /** Marks an output field produced by the kernel rather than copied from the input. */
+    public static final int COMPUTED = -1;
 
-    private GpuKernelGenerator() {}
+    private AccelKernelGenerator() {}
 
     /**
-     * Generates a kernel for the given expressions, or empty if any of them cannot be expressed.
+     * Generates a kernel for a projection, optionally over a filter, or empty if any part of it
+     * cannot be written as one.
      *
-     * <p>Returning empty is an ordinary outcome. {@link GpuCostEstimator} decides whether an
-     * expression is <em>worth</em> offloading; this decides whether it can be <em>written</em> as a
-     * kernel, and the two are independent.
-     *
-     * @param projection the Calc's projections, already expanded from program form
-     * @param condition the Calc's condition, or null
-     * @param classNameSuffix appended to the generated class name to keep it unique per query
+     * <p>Returning empty is an ordinary outcome and is how this provider declines a subtree.
      */
-    public static Optional<GpuKernelSource> generate(
-            List<RexNode> projection, @Nullable RexNode condition, String classNameSuffix) {
-        return generate(projection, condition, classNameSuffix, 0);
+    public static Optional<GpuKernelSource> generate(AccelNode subtree, String classNameSuffix) {
+        return generate(subtree, classNameSuffix, 0);
     }
 
     /**
-     * As above, optionally writing every computed column into one buffer.
+     * As above, optionally packing every computed column into one buffer {@code packedStride} rows
+     * apart, column-major.
      *
-     * <p>{@code packedStride} rows apart, column-major, so column <em>j</em> of row <em>i</em> is
-     * at {@code j * packedStride + i}. Used by aggregate fusion, where a buffer per column would
-     * mean a reduction task per column and a graph TornadoVM refuses to build past about a hundred
-     * tasks. Zero keeps the per-column arrays the Calc operator expects.
+     * <p>Packing exists so a contraction over <em>k</em> columns is one task rather than
+     * <em>k</em>: a task takes a fixed argument list, so k separate output arrays force k separate
+     * reductions, and TornadoVM refuses to build a graph past about a hundred tasks.
      */
     public static Optional<GpuKernelSource> generate(
-            List<RexNode> projection,
-            @Nullable RexNode condition,
-            String classNameSuffix,
-            int packedStride) {
+            AccelNode subtree, String classNameSuffix, int packedStride) {
 
-        // Only referenced columns are staged; a projected-through column stays on the host.
+        if (!(subtree instanceof AccelProject)) {
+            return Optional.empty();
+        }
+        AccelProject project = (AccelProject) subtree;
+        AccelNode input = project.inputs().get(0);
+        AccelExpression condition = null;
+        if (input instanceof AccelFilter) {
+            condition = ((AccelFilter) input).condition();
+            input = input.inputs().get(0);
+        }
+        // Anything deeper than Project-over-Filter-over-Input is a shape this generator has never
+        // been asked for; declining is the correct answer, not an error.
+        if (!input.inputs().isEmpty()) {
+            return Optional.empty();
+        }
+
         final Map<Integer, String> inputs = new LinkedHashMap<>();
-        // Filled by render() as columns are registered, so it stays in step with inputs.
         final Map<Integer, GpuValueType> inputTypes = new LinkedHashMap<>();
         final List<String> computed = new ArrayList<>();
         final List<GpuValueType> outputTypes = new ArrayList<>();
-        final int[] layout = new int[projection.size()];
+        final int[] layout = new int[project.projections().size()];
 
-        for (int field = 0; field < projection.size(); field++) {
-            RexNode expr = projection.get(field);
-            if (expr instanceof RexInputRef) {
-                layout[field] = ((RexInputRef) expr).getIndex();
+        for (int field = 0; field < project.projections().size(); field++) {
+            AccelExpression expression = project.projections().get(field);
+            if (expression instanceof AccelInputRef) {
+                layout[field] = ((AccelInputRef) expression).index();
                 continue;
             }
-            layout[field] = OUTPUT_COMPUTED;
-            if (!isDoubleResult(expr)) {
+            layout[field] = COMPUTED;
+            if (!isDoubleResult(expression.outputType())) {
                 return Optional.empty();
             }
-            String rendered = render(expr, inputs, inputTypes);
+            String rendered = render(expression, inputs, inputTypes);
             if (rendered == null) {
                 return Optional.empty();
             }
             computed.add(rendered);
-            outputTypes.add(valueTypeOf(expr.getType().getSqlTypeName()));
+            outputTypes.add(valueTypeOf(expression.outputType()));
         }
         if (computed.isEmpty()) {
             // Nothing to compute; the CPU path already handles pure projection.
@@ -203,8 +194,6 @@ public final class GpuKernelGenerator {
         if (packedStride > 0) {
             for (GpuValueType type : outputTypes) {
                 if (type != GpuValueType.DOUBLE) {
-                    // One buffer means one element type, and the contraction that reads it
-                    // accumulates in double. A narrower column would need its own buffer again.
                     return Optional.empty();
                 }
             }
@@ -242,9 +231,6 @@ public final class GpuKernelGenerator {
             @Nullable String condition,
             int packedStride) {
 
-        // Only the array classes this kernel actually mentions, so the generated source names
-        // nothing it does not use. IntArray is separate: a filter needs it for the mask whether or
-        // not any column is an integer.
         Set<String> arrayTypes = new TreeSet<>();
         for (GpuValueType type : inputTypes.values()) {
             arrayTypes.add(type.arrayType());
@@ -292,8 +278,6 @@ public final class GpuKernelGenerator {
         sb.append("        for (@Parallel int i = 0; i < ")
                 .append(first)
                 .append("_in.getSize(); i++) {\n");
-        // Widened to double on read, so the expression below is evaluated exactly as it was when
-        // every column was staged as a double. Only the buffer changed.
         for (String var : inputs.values()) {
             sb.append(INDENT)
                     .append("    double ")
@@ -304,9 +288,6 @@ public final class GpuKernelGenerator {
         }
         for (int i = 0; i < computed.size(); i++) {
             if (packedStride > 0) {
-                // Column-major into one buffer. The stride is a literal rather than a parameter
-                // because the batch size is known here, and a constant is one less thing for the
-                // device compiler to be given at run time.
                 sb.append(INDENT)
                         .append("    out.set(")
                         .append(i * packedStride)
@@ -315,8 +296,6 @@ public final class GpuKernelGenerator {
                         .append(");\n");
                 continue;
             }
-            // A FLOAT result is narrowed here rather than on the host, so the value that crosses
-            // the bus is the one the row type declares and the buffer is half the size.
             boolean narrow = outputTypes.get(i) == GpuValueType.FLOAT;
             sb.append(INDENT)
                     .append("    out")
@@ -328,8 +307,6 @@ public final class GpuKernelGenerator {
                     .append(");\n");
         }
         if (condition != null) {
-            // Written as if/else rather than a ternary: both compile, but this keeps the generated
-            // OpenCL readable under -Dtornado.printKernel=True.
             sb.append(INDENT).append("    if (").append(condition).append(") {\n");
             sb.append(INDENT).append("        mask.set(i, 1);\n");
             sb.append(INDENT).append("    } else {\n");
@@ -342,28 +319,37 @@ public final class GpuKernelGenerator {
         return sb.toString();
     }
 
-    /** Renders one expression, registering any column it reads. Null if it cannot be expressed. */
+    /** Renders one expression, registering any column it reads. Null if it cannot be written. */
     private static @Nullable String render(
-            RexNode node, Map<Integer, String> inputs, Map<Integer, GpuValueType> inputTypes) {
-        if (node instanceof RexInputRef) {
-            RexInputRef ref = (RexInputRef) node;
-            SqlTypeName sqlType = ref.getType().getSqlTypeName();
-            if (!isDoubleSafeInput(sqlType)) {
+            AccelExpression node, Map<Integer, String> inputs, Map<Integer, GpuValueType> types) {
+        if (node instanceof AccelInputRef) {
+            AccelInputRef ref = (AccelInputRef) node;
+            if (!isDoubleSafeInput(ref.outputType())) {
                 return null;
             }
-            inputTypes.putIfAbsent(ref.getIndex(), valueTypeOf(sqlType));
-            return inputs.computeIfAbsent(ref.getIndex(), index -> "c" + index);
+            types.putIfAbsent(ref.index(), valueTypeOf(ref.outputType()));
+            return inputs.computeIfAbsent(ref.index(), index -> "c" + index);
         }
-        if (node instanceof RexLiteral) {
-            return renderLiteral((RexLiteral) node);
+        if (node instanceof AccelLiteral) {
+            Object value = ((AccelLiteral) node).value();
+            if (value instanceof Boolean) {
+                return value.toString();
+            }
+            if (!(value instanceof Number)) {
+                return null;
+            }
+            double d = ((Number) value).doubleValue();
+            if (!Double.isFinite(d)) {
+                return null;
+            }
+            // Double.toString round-trips exactly, so the constant the kernel sees is the constant
+            // the planner folded.
+            return Double.toString(d);
         }
-        if (!(node instanceof RexCall)) {
-            return null;
-        }
-        RexCall call = (RexCall) node;
-        List<String> operands = new ArrayList<>();
-        for (RexNode operand : call.getOperands()) {
-            String rendered = render(operand, inputs, inputTypes);
+        AccelCall call = (AccelCall) node;
+        List<String> operands = new ArrayList<>(call.operands().size());
+        for (AccelExpression operand : call.operands()) {
+            String rendered = render(operand, inputs, types);
             if (rendered == null) {
                 return null;
             }
@@ -372,8 +358,8 @@ public final class GpuKernelGenerator {
         return renderCall(call, operands);
     }
 
-    private static @Nullable String renderCall(RexCall call, List<String> operands) {
-        switch (call.getKind()) {
+    private static @Nullable String renderCall(AccelCall call, List<String> operands) {
+        switch (call.function()) {
             case PLUS:
                 return infix(operands, "+");
             case MINUS:
@@ -382,15 +368,15 @@ public final class GpuKernelGenerator {
                 return infix(operands, "*");
             case DIVIDE:
                 return infix(operands, "/");
-            case MINUS_PREFIX:
+            case NEGATE:
                 return operands.size() == 1 ? "(-" + operands.get(0) + ")" : null;
             case GREATER_THAN:
                 return infix(operands, ">");
-            case GREATER_THAN_OR_EQUAL:
+            case GREATER_OR_EQUAL:
                 return infix(operands, ">=");
             case LESS_THAN:
                 return infix(operands, "<");
-            case LESS_THAN_OR_EQUAL:
+            case LESS_OR_EQUAL:
                 return infix(operands, "<=");
             case EQUALS:
                 return infix(operands, "==");
@@ -403,103 +389,105 @@ public final class GpuKernelGenerator {
             case NOT:
                 return operands.size() == 1 ? "(!" + operands.get(0) + ")" : null;
             case CAST:
-                // Every value on the device is already a double, so a widening numeric cast is a
-                // no-op. Narrowing casts must raise on overflow and a kernel cannot, so they are
-                // refused here as they are in the cost estimator.
-                return operands.size() == 1 && isDoubleResult(call) ? operands.get(0) : null;
+                // Every value here is already a double, so a widening numeric cast is a no-op.
+                // Narrowing casts must raise on overflow and a kernel cannot, so the planner
+                // refuses them before they arrive.
+                return operands.size() == 1 ? operands.get(0) : null;
+            case LEAST:
+            case GREATEST:
+                return foldOrdering(call, operands);
             default:
-                return renderFunction(call, operands);
+                return renderMath(call, operands);
         }
     }
 
-    /** Maps a named SQL function onto {@code TornadoMath}, which is what compiles to the device. */
-    private static @Nullable String renderFunction(RexCall call, List<String> operands) {
-        String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
-
-        // LEAST and GREATEST take any number of arguments; TornadoMath.min and max take two. Fold
-        // left, so LEAST(a, b, c) becomes min(min(a, b), c). Kept out of the switch below because
-        // that one pairs a name with a fixed arity.
-        if ("LEAST".equals(name) || "GREATEST".equals(name)) {
-            if (operands.size() < 2 || !isDoubleResult(call)) {
-                return null;
-            }
-            // NOT TornadoMath.min/max. Those propagate NaN the way Math.min does, and Flink does
-            // not: ScalarOperatorGens.generateGreatestLeast folds with Double.compareTo, whose
-            // total order places NaN above every other value. So NaN wins GREATEST and loses
-            // LEAST, and a kernel using min/max returns a different answer from the CPU plan for
-            // any row where an operand is NaN -- which SQRT of a negative produces routinely.
-            //
-            //   LEAST(a, b)    = (b != b || a < b) ? a : b
-            //   GREATEST(a, b) = (a != a || a > b) ? a : b
-            //
-            // Both fold left, as Flink's sequential comparison does.
-            boolean least = "LEAST".equals(name);
-            String folded = operands.get(0);
-            for (int i = 1; i < operands.size(); i++) {
-                String next = operands.get(i);
-                folded =
-                        least
-                                ? "((" + next + " != " + next + " || " + folded + " < " + next
-                                        + ") ? " + folded + " : " + next + ")"
-                                : "((" + folded + " != " + folded + " || " + folded + " > " + next
-                                        + ") ? " + folded + " : " + next + ")";
-            }
-            return folded;
+    /**
+     * LEAST and GREATEST, matching Flink's ordering rather than {@code TornadoMath.min}.
+     *
+     * <p>Flink folds these with {@code Double.compareTo}, whose total order places NaN above every
+     * other value: NaN wins GREATEST and loses LEAST. {@code min} and {@code max} propagate it
+     * instead, so a kernel using them returned a different answer from the CPU plan for any row
+     * where an operand was NaN — which SQRT of a negative produces routinely.
+     *
+     * <p>One divergence remains and is deliberate: {@code compareTo} orders {@code -0.0} below
+     * {@code 0.0} and {@code <} does not. Recovering the sign of a zero needs a reciprocal
+     * comparison, which is a division per comparison in every kernel using LEAST.
+     */
+    private static @Nullable String foldOrdering(AccelCall call, List<String> operands) {
+        if (operands.size() < 2 || !isDoubleResult(call.outputType())) {
+            return null;
         }
+        boolean least = call.function() == org.apache.flink.table.accelerator.AccelFunction.LEAST;
+        String folded = operands.get(0);
+        for (int i = 1; i < operands.size(); i++) {
+            String next = operands.get(i);
+            folded =
+                    least
+                            ? "((" + next + " != " + next + " || " + folded + " < " + next + ") ? "
+                                    + folded + " : " + next + ")"
+                            : "((" + folded + " != " + folded + " || " + folded + " > " + next
+                                    + ") ? " + folded + " : " + next + ")";
+        }
+        return folded;
+    }
 
+    /**
+     * Maps the remaining functions onto {@code TornadoMath}, which is what compiles to a device.
+     */
+    private static @Nullable String renderMath(AccelCall call, List<String> operands) {
         String fn;
         int arity = 1;
-        switch (name) {
-            case "ABS":
+        switch (call.function()) {
+            case ABS:
                 fn = "abs";
                 break;
-            case "SQRT":
+            case SQRT:
                 fn = "sqrt";
                 break;
-            case "EXP":
+            case EXP:
                 fn = "exp";
                 break;
-            case "LN":
+            case LN:
                 fn = "log";
                 break;
-            case "LOG2":
+            case LOG2:
                 fn = "log2";
                 break;
-            case "SIN":
+            case SIN:
                 fn = "sin";
                 break;
-            case "COS":
+            case COS:
                 fn = "cos";
                 break;
-            case "TAN":
+            case TAN:
                 fn = "tan";
                 break;
-            case "ASIN":
+            case ASIN:
                 fn = "asin";
                 break;
-            case "ACOS":
+            case ACOS:
                 fn = "acos";
                 break;
-            case "ATAN":
+            case ATAN:
                 fn = "atan";
                 break;
-            case "TANH":
+            case TANH:
                 fn = "tanh";
                 break;
-            case "FLOOR":
+            case FLOOR:
                 fn = "floor";
                 break;
-            case "CEIL":
+            case CEIL:
                 fn = "ceil";
                 break;
-            case "SIGN":
+            case SIGN:
                 fn = "signum";
                 break;
-            case "POWER":
+            case POWER:
                 fn = "pow";
                 arity = 2;
                 break;
-            case "ATAN2":
+            case ATAN2:
                 fn = "atan2";
                 arity = 2;
                 break;
@@ -516,49 +504,15 @@ public final class GpuKernelGenerator {
         if (operands.size() < 2) {
             return null;
         }
-        // Fully parenthesised: the tree already encodes precedence, so nothing is left to Java's.
+        // Fully parenthesised: the tree already encodes precedence.
         return "(" + String.join(" " + op + " ", operands) + ")";
     }
 
-    private static @Nullable String renderLiteral(RexLiteral literal) {
-        if (literal.getType().getSqlTypeName() == SqlTypeName.BOOLEAN) {
-            Object value = literal.getValue3();
-            return value instanceof Boolean ? value.toString() : null;
-        }
-        Object value = literal.getValue3();
-        double d;
-        if (value instanceof BigDecimal) {
-            d = ((BigDecimal) value).doubleValue();
-        } else if (value instanceof Number) {
-            d = ((Number) value).doubleValue();
-        } else {
-            return null;
-        }
-        if (!Double.isFinite(d)) {
-            return null;
-        }
-        // Double.toString round-trips exactly, so the constant the kernel sees is the constant the
-        // CPU plan folded.
-        return Double.toString(d);
-    }
-
-    /**
-     * Input types that survive a round trip through a double unchanged.
-     *
-     * <p>{@code BIGINT} is absent on purpose; see the class comment.
-     */
-    /**
-     * The width a column of this type is staged at.
-     *
-     * <p>Only called for types {@link #isDoubleSafeInput} or {@link #isDoubleResult} has already
-     * admitted, so the fall-through is unreachable rather than a default.
-     */
-    private static GpuValueType valueTypeOf(SqlTypeName type) {
-        switch (type) {
+    private static GpuValueType valueTypeOf(LogicalType type) {
+        switch (type.getTypeRoot()) {
             case INTEGER:
                 return GpuValueType.INT;
             case FLOAT:
-            case REAL:
                 return GpuValueType.FLOAT;
             case DOUBLE:
                 return GpuValueType.DOUBLE;
@@ -567,15 +521,15 @@ public final class GpuKernelGenerator {
         }
     }
 
-    private static boolean isDoubleSafeInput(SqlTypeName type) {
-        return type == SqlTypeName.DOUBLE
-                || type == SqlTypeName.FLOAT
-                || type == SqlTypeName.REAL
-                || type == SqlTypeName.INTEGER;
+    private static boolean isDoubleSafeInput(LogicalType type) {
+        LogicalTypeRoot root = type.getTypeRoot();
+        return root == LogicalTypeRoot.DOUBLE
+                || root == LogicalTypeRoot.FLOAT
+                || root == LogicalTypeRoot.INTEGER;
     }
 
-    private static boolean isDoubleResult(RexNode node) {
-        SqlTypeName type = node.getType().getSqlTypeName();
-        return type == SqlTypeName.DOUBLE || type == SqlTypeName.FLOAT || type == SqlTypeName.REAL;
+    private static boolean isDoubleResult(LogicalType type) {
+        LogicalTypeRoot root = type.getTypeRoot();
+        return root == LogicalTypeRoot.DOUBLE || root == LogicalTypeRoot.FLOAT;
     }
 }

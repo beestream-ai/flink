@@ -18,10 +18,10 @@
 
 package org.apache.flink.table.gpu;
 
+import org.apache.flink.table.gpu.codegen.GpuAggregateSpec;
+import org.apache.flink.table.gpu.codegen.GpuKernelSource;
+import org.apache.flink.table.gpu.codegen.GpuValueType;
 import org.apache.flink.table.gpu.operator.FusedAggregateEngine;
-import org.apache.flink.table.runtime.gpu.GpuAggregateSpec;
-import org.apache.flink.table.runtime.gpu.GpuKernelSource;
-import org.apache.flink.table.runtime.gpu.GpuValueType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
@@ -101,7 +101,7 @@ public final class FusedAggregateSweep {
                         layout,
                         BATCH);
         RowType row = RowType.of(fields, names);
-        return new GpuAggregateSpec(kernel, sums, row, row, BATCH, 100);
+        return new GpuAggregateSpec(kernel, sums, row, row, BATCH);
     }
 
     public static void main(String[] args) throws Exception {

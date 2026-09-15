@@ -101,22 +101,28 @@ class GpuMixedTypeColumnIT {
     }
 
     /**
-     * {@code BOOLEAN} is listed as a supported column type and is admitted nowhere.
+     * A {@code BOOLEAN} column projected through is eligible, and refused by whoever cannot stage
+     * it.
      *
-     * <p>Not as a kernel input -- the generator's whitelist is {@code DOUBLE}, {@code FLOAT},
-     * {@code REAL}, {@code INTEGER} -- and not as a projected-through column, which {@code
-     * canStage} restricts to the numeric four. A condition is boolean, which is presumably where
-     * the claim came from, but a boolean <em>column</em> has no way through.
+     * <p>This used to be a planner refusal, and it was the wrong place for it. Nothing about the
+     * query prevents carrying a boolean beside a computed column: what prevented it was that one
+     * backend stages columns in primitive arrays and has none for a boolean. That is a property of
+     * a backend, so the planner now reports the node as eligible and the provider declines it on
+     * the TaskManager -- which is also what a different backend, with a byte-packed boolean buffer,
+     * would need in order to accept it.
+     *
+     * <p>The refusal itself is still asserted, in the module that owns it: see {@code
+     * GpuCalcSpecStagingTest} in {@code flink-table-gpu-runtime}.
      */
     @Test
-    @DisplayName("a BOOLEAN column is refused, despite being listed as supported")
-    void booleanColumnIsRefused() {
+    @DisplayName("a BOOLEAN column is eligible; staging it is the provider's problem")
+    void booleanColumnIsEligible() {
         String plan =
                 tEnv.explainSql(
                         "SELECT b, EXP(d) * LN(d) + SIN(d) * COS(d) + POWER(d, 3.0) AS h "
                                 + "FROM mixed");
         String section = plan.substring(plan.indexOf("== GPU Offload =="));
-        assertTrue(section.contains("CPU"), "expected a refusal:\n" + section);
+        assertTrue(section.contains("GPU"), "expected eligibility:\n" + section);
     }
 
     @Test

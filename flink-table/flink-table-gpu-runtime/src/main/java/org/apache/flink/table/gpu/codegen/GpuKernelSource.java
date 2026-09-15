@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 
-package org.apache.flink.table.runtime.gpu;
+package org.apache.flink.table.gpu.codegen;
 
 import java.io.Serializable;
 import java.util.Arrays;

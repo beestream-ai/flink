@@ -16,10 +16,9 @@
  * limitations under the License.
  */
 
-package org.apache.flink.table.runtime.gpu;
+package org.apache.flink.table.gpu.codegen;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.types.logical.RowType;
 
 import java.io.Serializable;
@@ -59,15 +58,13 @@ public final class GpuAggregateSpec implements Serializable {
     private final RowType calcOutputType;
     private final RowType outputType;
     private final int batchSize;
-    private final AccelWorkProfile work;
 
     public GpuAggregateSpec(
             GpuKernelSource kernel,
             int[] sumSources,
             RowType calcOutputType,
             RowType outputType,
-            int batchSize,
-            AccelWorkProfile work) {
+            int batchSize) {
         if (sumSources.length != outputType.getFieldCount()) {
             throw new IllegalArgumentException(
                     "every aggregate output needs a source: "
@@ -81,7 +78,6 @@ public final class GpuAggregateSpec implements Serializable {
         this.calcOutputType = calcOutputType;
         this.outputType = outputType;
         this.batchSize = batchSize;
-        this.work = work;
     }
 
     /** The Calc's kernel, whose outputs the contraction reads. */
@@ -111,24 +107,14 @@ public final class GpuAggregateSpec implements Serializable {
         return batchSize;
     }
 
-    /**
-     * Work this subtree performs per row, counted per operation.
-     *
-     * <p>Carried so a provider can weigh it with its own device's costs. Flink does not weigh it:
-     * a weight table is a model of one accelerator.
-     */
-    public AccelWorkProfile work() {
-        return work;
-    }
-
     @Override
     public String toString() {
         return "GpuAggregateSpec["
                 + kernel.className()
                 + ", sums="
                 + Arrays.toString(sumSources)
-                + ", "
-                + work
+                + ", batch="
+                + batchSize
                 + "]";
     }
 }

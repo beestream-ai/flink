@@ -23,13 +23,12 @@ import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
+import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.planner.codegen.CalcCodeGenerator;
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
 import org.apache.flink.table.planner.delegation.PlannerBase;
-import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
-import org.apache.flink.table.planner.plan.gpu.GpuKernelGenerator;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadOptions;
@@ -41,8 +40,7 @@ import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTranslator;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.planner.utils.JavaScalaConversionUtil;
-import org.apache.flink.table.runtime.gpu.GpuCalcSpec;
-import org.apache.flink.table.runtime.gpu.GpuKernelSource;
+import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
 import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
 import org.apache.flink.table.runtime.operators.CodeGenOperatorFactory;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
@@ -227,21 +225,6 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
                 getClass().getSimpleName());
     }
 
-    /** This Calc's expressions as a device kernel, or empty if they cannot be generated. */
-    public Optional<GpuKernelSource> gpuKernel() {
-        return gpuKernel(0);
-    }
-
-    /**
-     * As above, optionally packing every computed column into one buffer {@code packedStride} rows
-     * apart -- which is what aggregate fusion needs, so that contracting <em>k</em> columns is one
-     * task rather than <em>k</em>.
-     */
-    public Optional<GpuKernelSource> gpuKernel(int packedStride) {
-        return GpuKernelGenerator.generate(
-                projection, condition, Integer.toString(getId()), packedStride);
-    }
-
     /**
      * Wraps the code-generated operator so the TaskManager can run this Calc on a device, or
      * returns it unchanged when this node will never offload.
@@ -264,9 +247,6 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
         if (assignment == null || !assignment.isOffloaded()) {
             return codeGenerated;
         }
-        // The legacy kernel is optional: its absence disqualifies only the pre-SPI provider.
-        Optional<GpuKernelSource> kernel =
-                GpuKernelGenerator.generate(projection, condition, Integer.toString(getId()));
         RowType inputType = (RowType) getInputEdges().get(0).getOutputType();
         Optional<AccelNode> subtree =
                 AccelIrBuilder.buildCalc(projection, condition, inputType, outputType);
@@ -274,35 +254,14 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
             recordGpuFallback(assignment, "expressions have no accelerator IR representation");
             return codeGenerated;
         }
-        GpuCalcSpec spec =
-                new GpuCalcSpec(
-                        kernel.orElse(null),
-                        kernel.map(GpuKernelSource::outputLayout).orElse(passThroughLayout()),
+        AcceleratedCalcSpec spec =
+                new AcceleratedCalcSpec(
+                        subtree.get(),
+                        assignment.verdict().work(),
                         outputType,
                         planner.getTableConfig().get(GpuOffloadOptions.BATCH_SIZE),
-                        assignment.verdict().work(),
-                        subtree.get(),
                         planner.getTableConfig().get(GpuOffloadOptions.MIN_SPEEDUP));
-        // canStage() describes what the legacy provider's fixed-width staging buffers can hold.
-        // It is not a property of the query, so it disqualifies only that provider -- one working
-        // from the IR decides for itself what it can stage.
-        if (kernel.isPresent() && !spec.canStage()) {
-            recordGpuFallback(assignment, "output row cannot be staged by the legacy provider");
-            return codeGenerated;
-        }
         return new GpuOrCpuCalcOperatorFactory(spec, codeGenerated);
-    }
-
-    /**
-     * Output layout when no kernel was generated: every field is computed by the provider.
-     *
-     * <p>The legacy layout distinguishes columns the kernel produces from ones staged host-side.
-     * A provider working from the IR makes that split itself, so there is nothing to describe.
-     */
-    private int[] passThroughLayout() {
-        int[] layout = new int[projection.size()];
-        java.util.Arrays.fill(layout, GpuCalcSpec.COMPUTED);
-        return layout;
     }
 
     /** Rewrites the node's verdict so EXPLAIN reports why a selected node still ran on the CPU. */

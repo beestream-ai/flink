@@ -174,8 +174,6 @@ public class GpuOffloadOptions {
                                     + "pass with the projection, so the intermediate never returns "
                                     + "to the host. Turn off to measure what that is worth.");
 
-
-
     /**
      * How much faster than the CPU a provider must claim to be before Flink prefers it.
      *
@@ -208,7 +206,7 @@ public class GpuOffloadOptions {
                                     + "trades memory per subtask against dispatch overhead. "
                                     + "Measured from 64K to 4M, device work stays near a tenth of "
                                     + "the total throughout and larger batches mainly reduce "
-                                    + "TornadoVM dispatch cost.");
+                                    + "the accelerator runtime dispatch cost.");
 
     private GpuOffloadOptions() {}
 }

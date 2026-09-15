@@ -18,11 +18,11 @@
 
 package org.apache.flink.table.gpu;
 
+import org.apache.flink.table.gpu.codegen.GpuCalcSpec;
+import org.apache.flink.table.gpu.codegen.GpuKernelSource;
+import org.apache.flink.table.gpu.codegen.GpuValueType;
 import org.apache.flink.table.gpu.metrics.OffloadMetrics;
 import org.apache.flink.table.gpu.operator.GeneratedKernelEngine;
-import org.apache.flink.table.runtime.gpu.GpuCalcSpec;
-import org.apache.flink.table.runtime.gpu.GpuKernelSource;
-import org.apache.flink.table.runtime.gpu.GpuValueType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -200,11 +200,7 @@ public final class GeneratedKernelSweep {
                         true,
                         new int[] {GpuCalcSpec.COMPUTED});
         return new GpuCalcSpec(
-                kernel,
-                new int[] {GpuCalcSpec.COMPUTED},
-                RowType.of(new DoubleType()),
-                batchSize,
-                0);
+                kernel, new int[] {GpuCalcSpec.COMPUTED}, RowType.of(new DoubleType()), batchSize);
     }
 
     private GeneratedKernelSweep() {}

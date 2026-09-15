@@ -22,7 +22,7 @@ import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.binary.BinaryRowData;
 import org.apache.flink.table.data.writer.BinaryRowWriter;
-import org.apache.flink.table.runtime.gpu.GpuValueType;
+import org.apache.flink.table.gpu.codegen.GpuValueType;
 
 import org.junit.jupiter.api.Test;
 

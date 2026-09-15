@@ -20,7 +20,7 @@ package org.apache.flink.table.gpu.gather;
 
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.binary.BinaryRowData;
-import org.apache.flink.table.runtime.gpu.GpuValueType;
+import org.apache.flink.table.gpu.codegen.GpuValueType;
 
 /**
  * Typed access rather than the {@link RowData} interface: identical result, one less virtual call.

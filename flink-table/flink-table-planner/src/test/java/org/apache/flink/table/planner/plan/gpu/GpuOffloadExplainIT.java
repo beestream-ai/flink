@@ -96,7 +96,7 @@ class GpuOffloadExplainIT {
         // the *client* had no provider was answering for the wrong machine.
         assertTrue(plan.contains("GPU  subtree 0"), plan);
         assertTrue(plan.contains("eligible"), plan);
-        assertFalse(plan.contains("no GpuOperatorFactoryProvider"), plan);
+        assertFalse(plan.contains("no accelerator provider"), plan);
     }
 
     @Test

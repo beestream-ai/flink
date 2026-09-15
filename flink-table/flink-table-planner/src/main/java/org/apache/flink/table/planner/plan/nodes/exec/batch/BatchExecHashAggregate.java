@@ -54,9 +54,7 @@ import org.apache.flink.table.planner.plan.utils.AggregateInfoList;
 import org.apache.flink.table.planner.plan.utils.AggregateUtil;
 import org.apache.flink.table.planner.utils.JavaScalaConversionUtil;
 import org.apache.flink.table.runtime.generated.GeneratedOperator;
-import org.apache.flink.table.runtime.gpu.GpuAggregateSpec;
-import org.apache.flink.table.runtime.gpu.GpuKernelSource;
-import org.apache.flink.table.runtime.gpu.GpuOrCpuAggregateOperatorFactory;
+import org.apache.flink.table.runtime.gpu.ChainedCalcAggregateOperator;
 import org.apache.flink.table.runtime.operators.CodeGenOperatorFactory;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
@@ -71,7 +69,6 @@ import javax.annotation.Nullable;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
 
 /** Batch {@link ExecNode} for hash-based aggregate operator. */
 @ExecNodeMetadata(
@@ -289,9 +286,9 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
     /**
      * Builds the operator that carries both halves, or leaves the generated aggregate alone.
      *
-     * <p>What is decided here is a property of the query: whether the pair was selected, and
-     * whether the Calc's expressions can be written as a kernel. Whether a device exists is not
-     * knowable in the client and is settled by {@link GpuOrCpuAggregateOperatorFactory} on arrival.
+     * <p>A fused pair has no accelerator route at all for now, so what is decided here is only
+     * whether a Calc was absorbed and therefore has to be run from inside this node. See the note
+     * below for why the device route is absent rather than deferred to the TaskManager.
      */
     private StreamOperatorFactory<RowData> wrapForFusedGpuOffload(
             PlannerBase planner,
@@ -302,29 +299,22 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         if (fusedCalc == null) {
             return aggregateFactory;
         }
-        // Packed, so the contraction is one task at any width. The stride is the batch size,
-        // which is known here and becomes a literal in the generated source.
-        int batchSize = planner.getTableConfig().get(GpuOffloadOptions.BATCH_SIZE);
-        Optional<GpuKernelSource> kernel = fusedCalc.gpuKernel(batchSize);
-        if (!kernel.isPresent()) {
-            recordFallback("the fused Calc's expressions cannot be generated as a device kernel");
-            return chainedOnly(planner, config, fusedCalc, inputTransform, aggregateFactory);
-        }
-        int[] sumSources = sumSources();
-        if (sumSources == null) {
-            recordFallback("the aggregate's outputs do not map one to one onto its calls");
-            return chainedOnly(planner, config, fusedCalc, inputTransform, aggregateFactory);
-        }
-        GpuAggregateSpec spec =
-                new GpuAggregateSpec(
-                        kernel.get(),
-                        sumSources,
-                        (RowType) fusedCalc.getOutputType(),
-                        (RowType) getOutputType(),
-                        batchSize,
-                        getGpuOffloadAssignment().verdict().work());
-        return new GpuOrCpuAggregateOperatorFactory(
-                spec, calcFactoryFor(planner, config, fusedCalc, inputTransform), aggregateFactory);
+        // The device route for a fused aggregate is deliberately not offered.
+        //
+        // It was the only thing left requiring the planner to generate a vendor kernel, and that
+        // dependency is what stopped the extension point being proposable on its own terms. The
+        // path is also already a known blocker in its own right: absorbing the Calc here leaves
+        // that ExecNode with no Transformation, so EXPLAIN and the running topology disagree
+        // (review finding C1). Task M4.1 replaces the whole arrangement with a graph rewrite that
+        // produces one node, and restoring the device route belongs there rather than here --
+        // migrating it now would mean migrating it twice, onto a shape that is going to change.
+        //
+        // Until then the pair still runs as one operator, with the generated Calc chained ahead of
+        // the generated aggregate. Results are unchanged; only the device is absent.
+        recordFallback(
+                "a fused aggregate has no accelerator route until fusion becomes a graph "
+                        + "rewrite (task M4.1)");
+        return chainedOnly(planner, config, fusedCalc, inputTransform, aggregateFactory);
     }
 
     /**
@@ -351,32 +341,6 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         return fusedCalc.generateCalcOperator(calcCtx, inputTransform);
     }
 
-    /**
-     * Which Calc output column feeds each aggregate output field.
-     *
-     * @return the mapping, or null when this node's shape is not the one {@code
-     *     GpuAggregateSupport} admitted -- a mismatch here means the two disagree, and the safe
-     *     reading is that this is not fusible after all
-     */
-    @Nullable
-    private int[] sumSources() {
-        if (aggCalls.length != getOutputType().getChildren().size()) {
-            return null;
-        }
-        int[] sources = new int[aggCalls.length];
-        for (int i = 0; i < aggCalls.length; i++) {
-            AggregateCall call = aggCalls[i];
-            if (call.getArgList().isEmpty()) {
-                sources[i] = GpuAggregateSpec.COUNT_STAR;
-            } else if (call.getArgList().size() == 1) {
-                sources[i] = call.getArgList().get(0);
-            } else {
-                return null;
-            }
-        }
-        return sources;
-    }
-
     /** Rewrites the verdict so EXPLAIN reports why a selected pair still ran on the CPU. */
     private void recordFallback(String reason) {
         GpuOffloadAssignment assignment = getGpuOffloadAssignment();
@@ -389,12 +353,13 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
     }
 
     /**
-     * The fused pair on the CPU, with no device path offered at all.
+     * The fused pair as one operator, with no device path offered at all.
      *
-     * <p>Distinct from {@link GpuOrCpuAggregateOperatorFactory}: that one asks the TaskManager and
-     * falls back, this one has already established in the client that there is nothing to ask
-     * about, because the expressions could not be generated. Both produce the same chained
-     * operator, so results are identical either way.
+     * <p>Fusion absorbs the {@code Calc} into this node, so that {@code ExecNode} produces no
+     * transformation of its own and its expressions have nowhere else to run. This factory keeps
+     * them running by building both generated operators on the TaskManager and wiring the Calc's
+     * output straight into the aggregate's input, so the pair executes as a single operator exactly
+     * as the fused plan describes.
      */
     private static final class ChainedOnlyFactory extends AbstractStreamOperatorFactory<RowData> {
 
@@ -413,7 +378,7 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         @Override
         public <T extends StreamOperator<RowData>> T createStreamOperator(
                 StreamOperatorParameters<RowData> parameters) {
-            return GpuOrCpuAggregateOperatorFactory.chain(
+            return ChainedCalcAggregateOperator.chain(
                     parameters, calcFactory, aggregateFactory, processingTimeService);
         }
 

@@ -18,11 +18,11 @@
 
 package org.apache.flink.table.gpu.operator;
 
+import org.apache.flink.table.gpu.codegen.GpuCalcSpec;
+import org.apache.flink.table.gpu.codegen.GpuKernelSource;
+import org.apache.flink.table.gpu.codegen.GpuValueType;
 import org.apache.flink.table.gpu.gather.RowGather;
 import org.apache.flink.table.gpu.metrics.OffloadMetrics;
-import org.apache.flink.table.runtime.gpu.GpuCalcSpec;
-import org.apache.flink.table.runtime.gpu.GpuKernelSource;
-import org.apache.flink.table.runtime.gpu.GpuValueType;
 
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;

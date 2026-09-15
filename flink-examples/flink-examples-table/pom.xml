@@ -72,11 +72,11 @@ under the License.
 		<!--
 			Provided scope, for two different reasons at once. GpuOffloadExample and
 			HaversineBenchmark never reference this module: they need it only so that
-			ServiceLoader finds GpuOperatorFactoryProvider, which is what putting the jar in a
+			ServiceLoader finds the AcceleratorProvider, which is what putting the jar in a
 			distribution's lib/ does for a real deployment; without it the planner silently
-			falls back to CPU. FeatureGramBenchmark does reference it, for FeatureGramEngine,
-			because no planner path reaches an aggregate yet and the example has to drive the
-			device itself.
+			falls back to CPU. FeatureGramBenchmark and ReferenceJoinBenchmark do reference it,
+			for FeatureGramEngine and ReferenceJoinEngine, because no planner path reaches an
+			aggregate or a join yet and those examples have to drive the device themselves.
 
 			Not compile scope: the jar belongs to the cluster, not to an example's jar, and it
 			drags TornadoVM behind it.

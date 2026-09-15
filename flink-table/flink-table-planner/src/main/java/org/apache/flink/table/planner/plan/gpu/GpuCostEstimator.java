@@ -49,8 +49,8 @@ import java.util.List;
  * <p><b>Nothing is executed.</b> This is a static walk over the {@code RexNode} tree the planner
  * already holds after optimisation, before any {@code Transformation} is built and long before a
  * record is read. Work is <em>counted</em> per operation, never weighted: a weight table is a model
- * of one device, and this one ran inside Flink where it could not be right for every accelerator.
- * A provider applies its own weights to these counts.
+ * of one device, and this one ran inside Flink where it could not be right for every accelerator. A
+ * provider applies its own weights to these counts.
  *
  * <p>Type eligibility is necessary and nowhere near sufficient: {@code val * 2.0 + 1.0} is
  * trivially expressible and measures 0.54x against CPU. Deciding that it is not worth moving
@@ -63,8 +63,8 @@ import java.util.List;
  * is costed as two. A kernel generator that recognised the common subexpression would do one. The
  * estimate therefore runs slightly high on expression-sharing queries, which biases toward
  * offloading — the less safe direction. It is left uncorrected because the effect is small next to
- * the order of magnitude a provider's own comparison resolves, and because the current kernel library does no
- * CSE either, so the estimate matches what actually executes.
+ * the order of magnitude a provider's own comparison resolves, and because the current kernel
+ * library does no CSE either, so the estimate matches what actually executes.
  *
  * <h2>Rejection is the safe direction</h2>
  *
@@ -99,9 +99,9 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
     /**
      * Costs one expression tree.
      *
-     * <p>Delegates to {@link #estimateAll} so a single expression and a list of them count the
-     * same way. The visitor below decides eligibility; it deliberately does not count, because
-     * counting is the IR's job and two independent counters would drift.
+     * <p>Delegates to {@link #estimateAll} so a single expression and a list of them count the same
+     * way. The visitor below decides eligibility; it deliberately does not count, because counting
+     * is the IR's job and two independent counters would drift.
      */
     public static RowCost estimate(RexNode node) {
         return estimateAll(java.util.Collections.singletonList(node), false);
@@ -135,8 +135,7 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
         for (RexNode node : nodes) {
             java.util.Optional<AccelExpression> converted = AccelIrBuilder.convert(node);
             if (!converted.isPresent()) {
-                return RowCost.ineligible(
-                        "no accelerator IR representation for " + node);
+                return RowCost.ineligible("no accelerator IR representation for " + node);
             }
             ir.add(converted.get());
         }
@@ -273,8 +272,8 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
     /**
      * Only casts between the supported numeric types are allowed, and only where the target holds
      * the source. A narrowing cast has overflow semantics the kernel does not implement, and SQL
-     * requires an error rather than a wrap — which a device kernel cannot raise (TornadoVM has no
-     * exception support).
+     * requires an error rather than a wrap — which a device kernel cannot raise (the accelerator
+     * runtime has no exception support).
      */
     private static boolean isSafeCast(RexCall call) {
         SqlTypeName from = call.getOperands().get(0).getType().getSqlTypeName();

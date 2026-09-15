@@ -19,9 +19,9 @@
 package org.apache.flink.table.gpu.operator;
 
 import org.apache.flink.table.gpu.gather.RowGather;
-import org.apache.flink.table.runtime.gpu.GpuAggregateSpec;
-import org.apache.flink.table.runtime.gpu.GpuKernelSource;
-import org.apache.flink.table.runtime.gpu.GpuValueType;
+import org.apache.flink.table.gpu.codegen.GpuAggregateSpec;
+import org.apache.flink.table.gpu.codegen.GpuKernelSource;
+import org.apache.flink.table.gpu.codegen.GpuValueType;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,33 +49,19 @@ import java.util.List;
  * the megabytes the same pair costs when the Calc has to emit rows for a separate aggregate to
  * consume.
  *
- * <h2>Why the contraction is generated rather than a library call</h2>
+ * <h2>Why the contraction is a library call, and why in FP64</h2>
  *
- * <p>{@code SUM(e1), ..., SUM(ek)} is {@code ones' * M}, and {@code cublasSgemv} would do it in one
- * call. It is not used here, and the reason is the {@code S}. The binding exposes no FP64 entry
- * point, so dispatching a {@code SUM} over a {@code DOUBLE} column to cuBLAS would quietly
- * accumulate hundreds of thousands of values in FP32 and hand back an answer several digits worse
- * than the CPU plan's, in a path whose entire premise is that the user did not ask for a device and
- * cannot tell one was used. A transparent optimisation may be slower than expected; it may not
- * return different numbers.
+ * <p>{@code SUM(e1), ..., SUM(ek)} is {@code ones' * M}, which is one matrix-vector product, so it
+ * is {@link CuBlas#cublasDgemv} in a single call. That contracts every output column at once -- the
+ * fused multiple reduction {@code @Reduce} cannot express, and that k separate kernels cannot scale
+ * to, since 136 of them is a graph TornadoVM refuses to build.
  *
- * <p>So the contraction is generated and stays in FP64. The library becomes reachable the moment
- * either side of that changes -- an FP64 binding, or a query whose columns are declared {@code
- * FLOAT} and so ask for FP32 in the first place -- and the shape here does not have to move for it.
- *
- * <h2>The reduction</h2>
- *
- * <p>One thread per output column would launch {@code k} threads on a device with thousands of
- * cores, which is the occupancy trap the standalone sweep already fell into. Instead each column is
- * split into {@link #PARTIALS} contiguous chunks, one thread each, and the host adds the chunk
- * sums. That last addition is what makes the result independent of how many threads ran.
- *
- * <p>The shape is copied from {@code FeatureGramEngine.features}, which works: an {@code int}
- * parameter as the parallel bound and a plain counted inner loop. The first attempt bounded the
- * parallel loop by {@code partials.getSize()} and strided by the thread count, and on hardware
- * exactly one thread ran and summed exactly one element -- the diagnostic reported "1 of 1024
- * partials non-zero, partial[0]=4752.41" against 262,144 rows staged. Neither loop bound survived,
- * so the accessor call and the stride are both gone.
+ * <p>The {@code D} is deliberate. An earlier version of this class used a generated FP64
+ * contraction precisely because the binding exposed only {@code cublasSgemv}, and accumulating
+ * hundreds of thousands of {@code DOUBLE} values in FP32 would hand back an answer several digits
+ * worse than the CPU plan's -- in a path whose entire premise is that the user did not ask for a
+ * device and cannot tell one was used. A transparent optimisation may be slower than expected; it
+ * may not return different numbers. Binding {@code cublasDgemv} removed the choice between the two.
  */
 public final class FusedAggregateEngine implements AutoCloseable {
 
@@ -88,28 +74,8 @@ public final class FusedAggregateEngine implements AutoCloseable {
      * the summation order for a given batch size, so two runs of the same query agree exactly even
      * though neither agrees bit for bit with the CPU's left-to-right order.
      */
-    private static final int PARTIALS = 1024;
-
-    /**
-     * The batch must divide evenly into chunks, so every element is covered exactly once.
-     *
-     * <p>Checked rather than assumed: a batch size that is not a multiple of {@link #PARTIALS}
-     * would drop the remainder of every batch from every sum, which looks like a rounding
-     * difference until someone counts.
-     */
-    private static int chunkSizeFor(int batchSize) {
-        if (batchSize % PARTIALS != 0) {
-            throw new IllegalArgumentException(
-                    "batch size "
-                            + batchSize
-                            + " is not a multiple of "
-                            + PARTIALS
-                            + "; the contraction would drop the remainder of every batch");
-        }
-        return batchSize / PARTIALS;
-    }
-
     private final GpuAggregateSpec spec;
+
     private final int batchSize;
 
     /** Staged input columns, one per column the kernel reads, at their declared widths. */
@@ -129,7 +95,7 @@ public final class FusedAggregateEngine implements AutoCloseable {
     /** 0/1 per row when the Calc has a condition; all ones when it does not. */
     private IntArray mask;
 
-    /** {@link #PARTIALS} partial sums per contracted column. */
+    /** One sum per contracted column, written by the contraction and the only buffer read back. */
     private DoubleArray partials;
 
     /**
@@ -208,13 +174,15 @@ public final class FusedAggregateEngine implements AutoCloseable {
                 new TaskGraph("fused-aggregate")
                         .transferToDevice(DataTransferMode.EVERY_EXECUTION, inputs)
                         .transferToDevice(DataTransferMode.EVERY_EXECUTION, mask, weights)
-                        // The projected columns never go to the host, but they still have to be
-                        // declared. FeatureGramEngine -- which works -- declares the buffer its
-                        // kernel writes and its library call then reads, for the same reason:
-                        // TornadoVM wants every task parameter named in a transfer list, and an
-                        // intermediate that appears in no list is not a buffer it has agreed to
-                        // keep. Leaving these out is the likeliest cause of the wrong sum.
-                        .transferToDevice(DataTransferMode.EVERY_EXECUTION, projected)
+                        // `projected` is deliberately in no transfer list. It is written by the
+                        // projection and read by the contraction, both on the device, and nothing
+                        // on the host ever looks at it. It was once declared in both directions on
+                        // the theory that TornadoVM will not keep an intermediate it has not been
+                        // told about; that theory was wrong -- ReferenceJoinEngine's scores matrix
+                        // appears in no list and is correct -- and the wrong sum it was meant to
+                        // explain turned out to be a staging bug in the operator instead. Copying
+                        // it cost `batchSize * outputCount` doubles in each direction per batch,
+                        // which for a 32-column gram matrix is over a gigabyte each way.
                         .task("project", entry, kernelArgs);
         if (source.hasFilter()) {
             // Fold the device-computed mask into the weights, so the contraction stays a single
@@ -240,7 +208,7 @@ public final class FusedAggregateEngine implements AutoCloseable {
                         0.0,
                         partials,
                         1);
-        graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, projected, partials);
+        graph = graph.transferToHost(DataTransferMode.EVERY_EXECUTION, partials);
 
         // Every task's iteration space, stated rather than inferred.
         GridScheduler grid = new GridScheduler();

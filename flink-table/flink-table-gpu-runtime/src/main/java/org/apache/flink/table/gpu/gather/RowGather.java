@@ -21,7 +21,7 @@ package org.apache.flink.table.gpu.gather;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.binary.BinaryRowData;
 import org.apache.flink.table.data.columnar.ColumnarRowData;
-import org.apache.flink.table.runtime.gpu.GpuValueType;
+import org.apache.flink.table.gpu.codegen.GpuValueType;
 
 import javax.annotation.Nullable;
 

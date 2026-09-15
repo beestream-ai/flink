@@ -19,7 +19,7 @@
 package org.apache.flink.table.gpu.gather;
 
 import org.apache.flink.table.data.RowData;
-import org.apache.flink.table.runtime.gpu.GpuValueType;
+import org.apache.flink.table.gpu.codegen.GpuValueType;
 
 /**
  * Any {@link RowData}: the interface accessors, which for a boxed row unwrap an Object.
