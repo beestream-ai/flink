@@ -28,9 +28,11 @@ import org.apache.flink.table.accelerator.AccelLiteral;
 import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.accelerator.AccelProject;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
-import org.apache.flink.table.functions.BuiltInFunctionDefinition;
+import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
+import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
+import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -40,6 +42,7 @@ import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlOperator;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 
 import javax.annotation.Nullable;
 
@@ -47,6 +50,7 @@ import java.io.Serializable;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -59,10 +63,15 @@ import java.util.Optional;
  *
  * <h2>The mapping is the type check</h2>
  *
- * <p>An operator becomes an {@link AccelFunction} only if it appears in {@link #FUNCTIONS}, which
- * is keyed on {@link SqlKind} and on the identity of Flink's own built-in functions — never on a
- * name string. A catalog function called {@code SQRT} therefore has no mapping and the conversion
- * fails, rather than being rendered as the builtin and quietly returning a different answer.
+ * <p>An operator becomes an {@link AccelFunction} only if it appears in one of three maps, keyed on
+ * {@link SqlKind}, on the identity of a Calcite operator, or on the identity of a Flink function
+ * definition — never on a name string. A catalog function called {@code SQRT} is a different object
+ * from {@code SqlStdOperatorTable.SQRT}, so it simply has no mapping and the conversion fails,
+ * rather than being rendered as the builtin and quietly returning a different answer.
+ *
+ * <p>That used to take an explicit guard — recognise the impostor, then trust the name. Keying on
+ * identity removes the impostor as a category: there is nothing to recognise, because only the
+ * built-in objects are in the maps.
  *
  * <p>Failure to convert is an ordinary outcome: it means this subtree is not offloadable, which is
  * what an empty {@link Optional} says.
@@ -73,14 +82,17 @@ public final class AccelIrBuilder {
     private static final Map<SqlKind, AccelFunction> BY_KIND = new HashMap<>();
 
     /**
-     * Operators recognised by the name of a Flink built-in.
+     * Calcite operators, keyed on the operator object itself.
      *
-     * <p>Built-ins reach the planner as {@code OTHER_FUNCTION} with no distinguishing kind, so the
-     * name is the only handle Calcite offers. The safety this loses is bought back by {@link
-     * #isBuiltIn}: a name is accepted only when the operator is a built-in rather than something a
-     * user registered under the same name.
+     * <p>An {@link IdentityHashMap} states the intent; {@link org.apache.calcite.sql.SqlOperator}
+     * does not override {@code equals}, so a {@code HashMap} would behave the same and say less.
      */
-    private static final Map<String, AccelFunction> BY_BUILT_IN_NAME = new HashMap<>();
+    private static final Map<SqlOperator, AccelFunction> BY_CALCITE_OPERATOR =
+            new IdentityHashMap<>();
+
+    /** Flink function definitions, keyed on the definition object itself. */
+    private static final Map<FunctionDefinition, AccelFunction> BY_DEFINITION =
+            new IdentityHashMap<>();
 
     static {
         BY_KIND.put(SqlKind.PLUS, AccelFunction.PLUS);
@@ -103,25 +115,38 @@ public final class AccelIrBuilder {
         BY_KIND.put(SqlKind.LEAST, AccelFunction.LEAST);
         BY_KIND.put(SqlKind.GREATEST, AccelFunction.GREATEST);
 
-        BY_BUILT_IN_NAME.put("ABS", AccelFunction.ABS);
-        BY_BUILT_IN_NAME.put("SQRT", AccelFunction.SQRT);
-        BY_BUILT_IN_NAME.put("EXP", AccelFunction.EXP);
-        BY_BUILT_IN_NAME.put("LN", AccelFunction.LN);
-        BY_BUILT_IN_NAME.put("LOG2", AccelFunction.LOG2);
-        BY_BUILT_IN_NAME.put("POWER", AccelFunction.POWER);
-        BY_BUILT_IN_NAME.put("SIN", AccelFunction.SIN);
-        BY_BUILT_IN_NAME.put("COS", AccelFunction.COS);
-        BY_BUILT_IN_NAME.put("TAN", AccelFunction.TAN);
-        BY_BUILT_IN_NAME.put("ASIN", AccelFunction.ASIN);
-        BY_BUILT_IN_NAME.put("ACOS", AccelFunction.ACOS);
-        BY_BUILT_IN_NAME.put("ATAN", AccelFunction.ATAN);
-        BY_BUILT_IN_NAME.put("ATAN2", AccelFunction.ATAN2);
-        BY_BUILT_IN_NAME.put("TANH", AccelFunction.TANH);
-        BY_BUILT_IN_NAME.put("SIGN", AccelFunction.SIGN);
-        // Flink defines its own LEAST and GREATEST, so they arrive as named built-ins rather than
-        // with SqlKind.LEAST / SqlKind.GREATEST. The kind entries above never match; these do.
-        BY_BUILT_IN_NAME.put("LEAST", AccelFunction.LEAST);
-        BY_BUILT_IN_NAME.put("GREATEST", AccelFunction.GREATEST);
+        // Identity, not name. Every entry below is the very operator object the planner puts in
+        // the RexCall, so a match means "this is that function", not "this is called that".
+        //
+        // Which table an operator comes from is not guessable and was measured rather than
+        // assumed: most arrive as Calcite's own, LEAST and GREATEST as Flink function definitions
+        // behind a bridging operator, and LOG2 and TANH from Flink's Calcite-side table, which is
+        // neither. Getting one wrong costs nothing visible -- the function is simply never
+        // offloaded again -- which is exactly how the earlier bug survived, so
+        // AccelIrBuilderTest walks this map and checks every entry still resolves.
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.ABS, AccelFunction.ABS);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.SQRT, AccelFunction.SQRT);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.EXP, AccelFunction.EXP);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.LN, AccelFunction.LN);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.POWER, AccelFunction.POWER);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.SIN, AccelFunction.SIN);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.COS, AccelFunction.COS);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.TAN, AccelFunction.TAN);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.ASIN, AccelFunction.ASIN);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.ACOS, AccelFunction.ACOS);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.ATAN, AccelFunction.ATAN);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.ATAN2, AccelFunction.ATAN2);
+        BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.SIGN, AccelFunction.SIGN);
+
+        // Flink's own, on the Calcite side: no SqlStdOperatorTable entry exists for either.
+        BY_CALCITE_OPERATOR.put(FlinkSqlOperatorTable.LOG2, AccelFunction.LOG2);
+        BY_CALCITE_OPERATOR.put(FlinkSqlOperatorTable.TANH, AccelFunction.TANH);
+
+        // And Flink's own, on the Table API side. These arrive as a BridgingSqlFunction wrapping
+        // the definition, so the identity that means anything is the definition's, not the
+        // operator's -- a bridging operator is constructed per call site.
+        BY_DEFINITION.put(BuiltInFunctionDefinitions.LEAST, AccelFunction.LEAST);
+        BY_DEFINITION.put(BuiltInFunctionDefinitions.GREATEST, AccelFunction.GREATEST);
     }
 
     private AccelIrBuilder() {}
@@ -227,35 +252,15 @@ public final class AccelIrBuilder {
         if (byKind != null) {
             return byKind;
         }
-        if (!isBuiltIn(call)) {
-            // A user function may share a built-in's name. Refusing here is what stops it being
-            // costed and executed as the built-in it is impersonating.
-            return null;
-        }
-        return BY_BUILT_IN_NAME.get(
-                call.getOperator().getName().toUpperCase(java.util.Locale.ROOT));
-    }
-
-    /**
-     * Whether the call's operator is one Flink or Calcite defines, rather than one a user
-     * registered.
-     *
-     * <p>This is the check that makes a name safe to use. A catalog function reaches the planner as
-     * a {@link BridgingSqlFunction} whose definition is <em>not</em> a {@link
-     * BuiltInFunctionDefinition}; Flink's own functions arrive the same way but with one that is.
-     * Anything straight out of Calcite's operator table is a built-in by construction.
-     *
-     * <p>Without it, a user function registered as {@code SQRT} would be converted to {@link
-     * AccelFunction#SQRT} and executed as the builtin — a wrong answer from a correct-looking
-     * query, and review finding A3.
-     */
-    private static boolean isBuiltIn(RexCall call) {
         SqlOperator operator = call.getOperator();
         if (operator instanceof BridgingSqlFunction) {
-            return ((BridgingSqlFunction) operator).getDefinition()
-                    instanceof BuiltInFunctionDefinition;
+            // The bridging operator is built per call site, so its identity means nothing; the
+            // definition behind it is the stable object. A user's catalog function reaches here
+            // the same way with a definition that is in no map, and is refused by not matching --
+            // it no longer has to be recognised as an impostor first.
+            return BY_DEFINITION.get(((BridgingSqlFunction) operator).getDefinition());
         }
-        return operator.getClass().getName().startsWith("org.apache.calcite.sql");
+        return BY_CALCITE_OPERATOR.get(operator);
     }
 
     private static Optional<AccelExpression> convertLiteral(RexLiteral literal) {
