@@ -274,7 +274,7 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
                         kernel.get().outputLayout(),
                         outputType,
                         planner.getTableConfig().get(GpuOffloadOptions.BATCH_SIZE),
-                        assignment.verdict().rowCost());
+                        assignment.verdict().work());
         if (!spec.canStage()) {
             recordGpuFallback(assignment, "output row cannot be staged for a device");
             return codeGenerated;

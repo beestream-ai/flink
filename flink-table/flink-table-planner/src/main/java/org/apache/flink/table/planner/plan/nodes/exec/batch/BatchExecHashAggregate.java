@@ -322,7 +322,7 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
                         (RowType) fusedCalc.getOutputType(),
                         (RowType) getOutputType(),
                         batchSize,
-                        getGpuOffloadAssignment().verdict().rowCost());
+                        getGpuOffloadAssignment().verdict().work());
         return new GpuOrCpuAggregateOperatorFactory(
                 spec, calcFactoryFor(planner, config, fusedCalc, inputTransform), aggregateFactory);
     }

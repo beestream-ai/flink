@@ -145,6 +145,17 @@ public final class AccelIrBuilder {
         return logicalType(call).map(type -> new AccelCall(function, operands, type));
     }
 
+    /**
+     * Whether this call has an IR representation at all.
+     *
+     * <p>The single admission list. Before this existed the vocabulary was stated three times --
+     * in the cost estimator's weight table, in the kernel generator's switch, and implicitly in
+     * whatever the runtime could execute -- and nothing kept them in step.
+     */
+    public static boolean supports(RexCall call) {
+        return functionOf(call) != null;
+    }
+
     /** Counts the work a set of expressions performs on each input row. */
     public static AccelWorkProfile profile(
             List<AccelExpression> expressions,

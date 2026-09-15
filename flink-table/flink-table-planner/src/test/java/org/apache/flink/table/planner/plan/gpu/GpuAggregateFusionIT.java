@@ -116,8 +116,11 @@ class GpuAggregateFusionIT {
 
     @Test
     @DisplayName("an aggregate alone never clears the floor, which is why it must ride along")
-    void aggregateAloneIsBelowTheFloor() {
+    void aggregateAloneDoesAlmostNoWork() {
         String s = section("SELECT SUM(val) FROM t");
-        assertTrue(s.contains("CPU"), s);
+        // An ungrouped SUM is one accumulate per row and nothing else. It is eligible -- there is
+        // no floor left to fall below -- but the work it reports is a single operation, which is
+        // exactly what a provider needs in order to decline it.
+        assertTrue(s.contains("PLUSx1"), s);
     }
 }

@@ -18,6 +18,10 @@
 
 package org.apache.flink.table.planner.plan.gpu;
 
+import org.apache.flink.table.accelerator.AccelExpression;
+import org.apache.flink.table.accelerator.AccelWorkProfile;
+import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
+
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexCorrelVariable;
@@ -44,12 +48,13 @@ import java.util.List;
  *
  * <p><b>Nothing is executed.</b> This is a static walk over the {@code RexNode} tree the planner
  * already holds after optimisation, before any {@code Transformation} is built and long before a
- * record is read. Cost is counted in weighted operations per row (see {@link OperatorWeights}), and
- * compared against a floor calibrated once per device.
+ * record is read. Work is <em>counted</em> per operation, never weighted: a weight table is a model
+ * of one device, and this one ran inside Flink where it could not be right for every accelerator.
+ * A provider applies its own weights to these counts.
  *
- * <p>Why a floor is needed at all: a predicate that only checks types admits {@code val * 2.0 +
- * 1.0}, which measures 0.54× against CPU — the offload would make such queries roughly twice as
- * slow, silently. Type eligibility is necessary and nowhere near sufficient.
+ * <p>Type eligibility is necessary and nowhere near sufficient: {@code val * 2.0 + 1.0} is
+ * trivially expressible and measures 0.54x against CPU. Deciding that it is not worth moving
+ * requires knowing the device, so it happens on the TaskManager rather than here.
  *
  * <h2>Common subexpressions are counted more than once</h2>
  *
@@ -58,7 +63,7 @@ import java.util.List;
  * is costed as two. A kernel generator that recognised the common subexpression would do one. The
  * estimate therefore runs slightly high on expression-sharing queries, which biases toward
  * offloading — the less safe direction. It is left uncorrected because the effect is small next to
- * the order of magnitude the floor has to resolve, and because the current kernel library does no
+ * the order of magnitude a provider's own comparison resolves, and because the current kernel library does no
  * CSE either, so the estimate matches what actually executes.
  *
  * <h2>Rejection is the safe direction</h2>
@@ -91,9 +96,15 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
         }
     }
 
-    /** Costs one expression tree. */
+    /**
+     * Costs one expression tree.
+     *
+     * <p>Delegates to {@link #estimateAll} so a single expression and a list of them count the
+     * same way. The visitor below decides eligibility; it deliberately does not count, because
+     * counting is the IR's job and two independent counters would drift.
+     */
     public static RowCost estimate(RexNode node) {
-        return node.accept(new GpuCostEstimator());
+        return estimateAll(java.util.Collections.singletonList(node), false);
     }
 
     /**
@@ -104,17 +115,73 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
      * are not (see {@link #visitLiteral}).
      */
     public static RowCost estimateAll(List<? extends RexNode> nodes) {
-        RowCost total = RowCost.ZERO;
+        return estimateAll(nodes, true);
+    }
+
+    private static RowCost estimateAll(List<? extends RexNode> nodes, boolean checkOutputTypes) {
         for (RexNode node : nodes) {
-            if (!isSupportedType(node.getType())) {
+            if (checkOutputTypes && !isSupportedType(node.getType())) {
                 return RowCost.ineligible("unsupported output type " + node.getType());
             }
-            total = total.plus(estimate(node));
-            if (!total.isEligible()) {
-                return total;
+            RowCost admitted = node.accept(new GpuCostEstimator());
+            if (!admitted.isEligible()) {
+                return admitted;
             }
         }
-        return total;
+        // Eligibility is settled above; this second pass counts. Two walks, each with one job:
+        // the refusal rules stay readable and the counting cannot silently disagree with what the
+        // IR admits, because it is the IR that does the counting.
+        List<AccelExpression> ir = new java.util.ArrayList<>(nodes.size());
+        for (RexNode node : nodes) {
+            java.util.Optional<AccelExpression> converted = AccelIrBuilder.convert(node);
+            if (!converted.isPresent()) {
+                return RowCost.ineligible(
+                        "no accelerator IR representation for " + node);
+            }
+            ir.add(converted.get());
+        }
+        AccelWorkProfile work =
+                AccelIrBuilder.profile(
+                        ir, bytesPerRow(nodes), bytesPerRow(nodes), AccelWorkProfile.UNKNOWN_ROWS);
+        return RowCost.of(work);
+    }
+
+    /**
+     * Width of the columns a set of expressions reads, in bytes per row.
+     *
+     * <p>Approximate by design: it charges each distinct referenced column once at its declared
+     * width. What matters to a provider is the ratio of this to the operation counts — arithmetic
+     * intensity — and that ratio is not sensitive to a byte here or there.
+     */
+    private static int bytesPerRow(List<? extends RexNode> nodes) {
+        java.util.Set<Integer> seen = new java.util.HashSet<>();
+        int[] bytes = {0};
+        for (RexNode node : nodes) {
+            node.accept(
+                    new org.apache.calcite.rex.RexVisitorImpl<Void>(true) {
+                        @Override
+                        public Void visitInputRef(RexInputRef ref) {
+                            if (seen.add(ref.getIndex())) {
+                                bytes[0] += widthOf(ref.getType().getSqlTypeName());
+                            }
+                            return null;
+                        }
+                    });
+        }
+        return bytes[0];
+    }
+
+    private static int widthOf(SqlTypeName type) {
+        switch (type) {
+            case INTEGER:
+            case FLOAT:
+            case REAL:
+                return 4;
+            case BOOLEAN:
+                return 1;
+            default:
+                return 8;
+        }
     }
 
     @Override
@@ -124,7 +191,7 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
         // nullability is the pass-through buffer's business (task 0.1a), not the kernel's.
         // Nullable *expression inputs* are refused in visitCall, where the operand walk is.
         return isSupportedType(ref.getType())
-                ? RowCost.of(OperatorWeights.LEAF)
+                ? RowCost.ZERO
                 : RowCost.ineligible("unsupported column type " + ref.getType());
     }
 
@@ -143,7 +210,7 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
         //
         // Where the enclosing type is DOUBLE, Flink's own generated code narrows the literal the
         // same way, so matching it is agreement with the CPU path rather than a new rounding risk.
-        return RowCost.of(OperatorWeights.LEAF);
+        return RowCost.ZERO;
     }
 
     @Override
@@ -156,15 +223,14 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
                             + call.getOperator().getName());
         }
 
-        Integer weight = weightOf(call);
-        if (weight == null) {
-            return RowCost.ineligible("no kernel for operator " + call.getOperator().getName());
+        if (!AccelIrBuilder.supports(call)) {
+            return RowCost.ineligible(
+                    "no accelerator IR for operator " + call.getOperator().getName());
         }
         if (call.getKind() == SqlKind.CAST && !isSafeCast(call)) {
             return RowCost.ineligible("unsupported cast to " + call.getType());
         }
-
-        RowCost total = RowCost.of(weight);
+        RowCost total = RowCost.ZERO;
         for (RexNode operand : call.getOperands()) {
             // BIGINT is admitted as a column but refused as an operand, matching what the
             // generator will accept. Staging is DoubleArray, and a long beyond 2^53 does not
@@ -202,16 +268,6 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
             }
         }
         return total;
-    }
-
-    private static Integer weightOf(RexCall call) {
-        Integer byKind = OperatorWeights.forKind(call.getKind());
-        if (byKind != null) {
-            return byKind;
-        }
-        // Named scalar functions arrive as OTHER_FUNCTION with the name on the operator.
-        return OperatorWeights.forFunction(
-                call.getOperator().getName().toUpperCase(java.util.Locale.ROOT));
     }
 
     /**

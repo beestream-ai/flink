@@ -19,6 +19,7 @@
 package org.apache.flink.table.runtime.gpu;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.types.logical.RowType;
 
 import java.io.Serializable;
@@ -58,7 +59,7 @@ public final class GpuAggregateSpec implements Serializable {
     private final RowType calcOutputType;
     private final RowType outputType;
     private final int batchSize;
-    private final int rowCost;
+    private final AccelWorkProfile work;
 
     public GpuAggregateSpec(
             GpuKernelSource kernel,
@@ -66,7 +67,7 @@ public final class GpuAggregateSpec implements Serializable {
             RowType calcOutputType,
             RowType outputType,
             int batchSize,
-            int rowCost) {
+            AccelWorkProfile work) {
         if (sumSources.length != outputType.getFieldCount()) {
             throw new IllegalArgumentException(
                     "every aggregate output needs a source: "
@@ -80,7 +81,7 @@ public final class GpuAggregateSpec implements Serializable {
         this.calcOutputType = calcOutputType;
         this.outputType = outputType;
         this.batchSize = batchSize;
-        this.rowCost = rowCost;
+        this.work = work;
     }
 
     /** The Calc's kernel, whose outputs the contraction reads. */
@@ -110,8 +111,14 @@ public final class GpuAggregateSpec implements Serializable {
         return batchSize;
     }
 
-    public int rowCost() {
-        return rowCost;
+    /**
+     * Work this subtree performs per row, counted per operation.
+     *
+     * <p>Carried so a provider can weigh it with its own device's costs. Flink does not weigh it:
+     * a weight table is a model of one accelerator.
+     */
+    public AccelWorkProfile work() {
+        return work;
     }
 
     @Override
@@ -121,7 +128,7 @@ public final class GpuAggregateSpec implements Serializable {
                 + ", sums="
                 + Arrays.toString(sumSources)
                 + ", "
-                + rowCost
-                + " ops/row]";
+                + work
+                + "]";
     }
 }

@@ -99,13 +99,11 @@ class GpuCostEstimatorTest {
 
         assertTrue(cost.isEligible(), cost::rejection);
         // one multiply, one add, one comparison
-        assertEquals(3, cost.weight());
-        // Measured at 0.54x against CPU. Whatever the calibrated floor turns out to be, it is far
-        // above this; the test asserts the estimator puts the query in the "obviously not worth it"
-        // regime rather than pinning a specific floor.
-        assertTrue(
-                cost.weight() < 24,
-                "target query must land below the lowest measured losing intensity");
+        assertEquals(3, cost.opsPerRow(), "a multiply, an add and a comparison");
+        // Measured at 0.54x against CPU. The estimator says so by reporting three operations over
+        // eight bytes a row; it does not conclude anything from that, because what three
+        // operations cost is a property of a device the planner cannot see.
+        assertTrue(cost.opsPerRow() < 24, "the losing query does very little arithmetic");
     }
 
     @Test
@@ -129,8 +127,8 @@ class GpuCostEstimatorTest {
 
         assertTrue(cost.isEligible(), cost::rejection);
         // EXP 20 + LN 20 + TIMES 1 + SQRT 8 + POWER 24 + DIVIDE 4 + PLUS 1
-        assertEquals(78, cost.weight());
-        assertTrue(cost.weight() > 24, "must clear the low end of the measured crossover band");
+        assertTrue(cost.opsPerRow() > 0, "the haversine expression performs real work");
+        assertTrue(cost.opsPerRow() > 5, "and substantially more of it than the cheap query");
     }
 
     @Test
@@ -165,7 +163,7 @@ class GpuCostEstimatorTest {
         RowCost cost = GpuCostEstimator.estimate(call);
 
         assertFalse(cost.isEligible());
-        assertTrue(cost.rejection().contains("no kernel for operator"), cost::rejection);
+        assertTrue(cost.rejection().contains("no accelerator IR for operator"), cost::rejection);
     }
 
     @Test
@@ -175,8 +173,8 @@ class GpuCostEstimatorTest {
         RowCost second = RowCost.ineligible("second");
 
         assertEquals("first", first.plus(second).rejection());
-        assertEquals("first", first.plus(RowCost.of(10)).rejection());
-        assertEquals("second", RowCost.of(10).plus(second).rejection());
+        assertEquals("first", first.plus(RowCost.ZERO).rejection());
+        assertEquals("second", RowCost.ZERO.plus(second).rejection());
     }
 
     @Test
@@ -186,7 +184,10 @@ class GpuCostEstimatorTest {
         RexNode widening = rex.makeCast(t(SqlTypeName.DOUBLE), intCol);
         RowCost wide = GpuCostEstimator.estimate(widening);
         assertTrue(wide.isEligible(), wide::rejection);
-        assertEquals(0, wide.weight(), "a widening numeric cast costs nothing on device");
+        assertEquals(
+                1,
+                wide.opsPerRow(),
+                "a widening cast is one CAST operation in the IR; what it costs is the device's business");
 
         RexNode doubleCol = col(SqlTypeName.DOUBLE, 0);
         RexNode narrowing = rex.makeCast(t(SqlTypeName.INTEGER), doubleCol);
@@ -196,7 +197,7 @@ class GpuCostEstimatorTest {
     }
 
     @Test
-    @DisplayName("costs sum across a subtree, which is how fusion clears the floor")
+    @DisplayName("work sums across a subtree, so a fused group reports what it all does")
     void costsSumAcrossExpressions() {
         RexNode val = col(SqlTypeName.DOUBLE, 0);
         RexNode sqrt = rex.makeCall(SqlStdOperatorTable.SQRT, val);
@@ -204,8 +205,8 @@ class GpuCostEstimatorTest {
         RowCost one = GpuCostEstimator.estimate(sqrt);
         RowCost three = GpuCostEstimator.estimateAll(List.of(sqrt, sqrt, sqrt));
 
-        assertEquals(8, one.weight());
-        assertEquals(24, three.weight());
+        assertEquals(1, one.opsPerRow());
+        assertEquals(3, three.opsPerRow());
     }
 
     @Test

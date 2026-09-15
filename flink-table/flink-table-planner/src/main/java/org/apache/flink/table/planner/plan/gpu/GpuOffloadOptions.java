@@ -36,10 +36,10 @@ public class GpuOffloadOptions {
                     .booleanType()
                     .defaultValue(false)
                     .withDescription(
-                            "If true, subtrees of the plan whose per-row work is expressible as a "
-                                    + "data-parallel kernel and exceeds "
-                                    + GpuOffloadDecision.MIN_ROW_COST_KEY
-                                    + " are executed on a GPU. Off by default.");
+                            "If true, subtrees of the plan whose per-row work can be represented "
+                                    + "for an accelerator are offered to a provider on the "
+                                    + "TaskManager, which decides against its own hardware "
+                                    + "whether to run them. Off by default.");
 
     /**
      * Whether an offloaded task should <em>ask</em> to be placed where a device is.
@@ -174,31 +174,7 @@ public class GpuOffloadOptions {
                                     + "pass with the projection, so the intermediate never returns "
                                     + "to the host. Turn off to measure what that is worth.");
 
-    public static final ConfigOption<Long> MIN_TOTAL_WORK =
-            ConfigOptions.key(GpuOffloadDecision.MIN_TOTAL_WORK_KEY)
-                    .longType()
-                    .defaultValue(GpuOffloadDecision.DEFAULT_MIN_TOTAL_WORK)
-                    .withDescription(
-                            "Minimum total work, in weighted operations across all rows, before a "
-                                    + "subtree is offloaded. The per-row floor asks whether the "
-                                    + "device is faster on each row; this asks whether there are "
-                                    + "enough rows to repay what offloading costs once per task -- "
-                                    + "compiling the kernel with javac, compiling it again for the "
-                                    + "device, and allocating the staging buffers. A heavy "
-                                    + "expression over a short input clears the first gate and "
-                                    + "still loses.");
 
-    public static final ConfigOption<Integer> MIN_ROW_COST =
-            ConfigOptions.key(GpuOffloadDecision.MIN_ROW_COST_KEY)
-                    .intType()
-                    .defaultValue(GpuOffloadDecision.DEFAULT_MIN_ROW_COST)
-                    .withDescription(
-                            "Minimum estimated per-row work, in weighted operations, before a "
-                                    + "subtree is offloaded. Expressions below this threshold are "
-                                    + "faster on the CPU than the staging and device transfer the "
-                                    + "offload would add. Device-specific: calibrate with the "
-                                    + "intensity sweep in the offload harness rather than assuming "
-                                    + "the default transfers.");
 
     public static final ConfigOption<Integer> BATCH_SIZE =
             ConfigOptions.key("table.exec.gpu-offload.batch-size")

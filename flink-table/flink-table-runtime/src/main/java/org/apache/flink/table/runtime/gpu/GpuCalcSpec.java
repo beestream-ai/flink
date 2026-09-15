@@ -20,6 +20,7 @@ package org.apache.flink.table.runtime.gpu;
 
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
+import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.types.logical.RowType;
 
 import java.io.Serializable;
@@ -48,19 +49,19 @@ public final class GpuCalcSpec implements Serializable {
     private final int[] outputLayout;
     private final RowType outputType;
     private final int batchSize;
-    private final int rowCost;
+    private final AccelWorkProfile work;
 
     public GpuCalcSpec(
             GpuKernelSource kernel,
             int[] outputLayout,
             RowType outputType,
             int batchSize,
-            int rowCost) {
+            AccelWorkProfile work) {
         this.kernel = kernel;
         this.outputLayout = outputLayout;
         this.outputType = outputType;
         this.batchSize = batchSize;
-        this.rowCost = rowCost;
+        this.work = work;
     }
 
     public GpuKernelSource kernel() {
@@ -91,9 +92,14 @@ public final class GpuCalcSpec implements Serializable {
         return batchSize;
     }
 
-    /** Estimated weighted work per row, carried through so the runtime can report it. */
-    public int rowCost() {
-        return rowCost;
+    /**
+     * Work this subtree performs per row, counted per operation.
+     *
+     * <p>Carried so a provider can weigh it with its own device's costs. Flink does not weigh it:
+     * a weight table is a model of one accelerator.
+     */
+    public AccelWorkProfile work() {
+        return work;
     }
 
     /**
@@ -139,8 +145,8 @@ public final class GpuCalcSpec implements Serializable {
                 + Arrays.toString(outputLayout)
                 + ", batch="
                 + batchSize
-                + ", cost="
-                + rowCost
+                + ", work="
+                + work
                 + "]";
     }
 }

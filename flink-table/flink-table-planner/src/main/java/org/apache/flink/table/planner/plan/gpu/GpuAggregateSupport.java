@@ -18,6 +18,9 @@
 
 package org.apache.flink.table.planner.plan.gpu;
 
+import org.apache.flink.table.accelerator.AccelFunction;
+import org.apache.flink.table.accelerator.AccelWorkProfile;
+
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -54,15 +57,14 @@ import org.apache.calcite.sql.type.SqlTypeName;
 public final class GpuAggregateSupport {
 
     /**
-     * Weighted cost of contracting one row into one accumulator.
+     * Operations charged for contracting one row into one accumulator.
      *
-     * <p>A multiply and an add, in the units {@code OperatorWeights} uses for the expression side.
-     * Small on purpose: an aggregate on its own never clears the offload floor, and should not.
-     * What makes the pair worth offloading is the <em>Calc</em> underneath it, and the processor
-     * sums a subtree's costs precisely so that a cheap contraction rides along with the expensive
-     * expression that feeds it rather than being judged alone.
+     * <p>One accumulate per row per sum. Small on purpose: an aggregate on its own does almost no
+     * arithmetic, and what makes the pair worth offloading is the <em>Calc</em> underneath it. The
+     * processor combines a subtree's work precisely so a cheap contraction travels with the
+     * expensive expression that feeds it rather than being judged alone.
      */
-    static final int WEIGHT_PER_SUM = 2;
+    static final int OPS_PER_SUM = 1;
 
     private GpuAggregateSupport() {}
 
@@ -81,7 +83,7 @@ public final class GpuAggregateSupport {
             return RowCost.ineligible("no aggregate calls to compute");
         }
 
-        int weight = 0;
+        int sums = 0;
         for (AggregateCall call : aggCalls) {
             if (call.isDistinct()) {
                 return RowCost.ineligible("DISTINCT aggregates need hashing, not a contraction");
@@ -106,14 +108,18 @@ public final class GpuAggregateSupport {
                                 + call.getType().getSqlTypeName()
                                 + ", which is not staged");
             }
-            weight += WEIGHT_PER_SUM;
+            sums++;
         }
-        if (weight == 0) {
+        if (sums == 0) {
             // COUNT(*) alone: correct on a device and pointless there, since the answer is the row
             // count and reading the input is the whole job.
             return RowCost.ineligible("only COUNT(*), which needs no device");
         }
-        return RowCost.of(weight);
+        // A contraction is one accumulate per row per sum. Counted, not weighted: what that
+        // accumulate costs is the provider's business.
+        int[] ops = new int[AccelFunction.values().length];
+        ops[AccelFunction.PLUS.ordinal()] = sums * OPS_PER_SUM;
+        return RowCost.of(new AccelWorkProfile(ops, 8 * sums, 8 * sums, AccelWorkProfile.UNKNOWN_ROWS));
     }
 
     /** The accumulator types a staged contraction can produce. */

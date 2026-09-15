@@ -18,16 +18,25 @@
 
 package org.apache.flink.table.planner.plan.gpu;
 
+import org.apache.flink.table.accelerator.AccelWorkProfile;
+
+import javax.annotation.Nullable;
+
 import java.util.Objects;
 
 /**
- * Result of costing an expression tree for GPU offload: either an estimated per-row work weight, or
- * a reason the expression cannot run on the device at all.
+ * What the planner can say about a subtree: either the work it performs, or why it cannot be
+ * represented for an accelerator at all.
  *
- * <p>The two are one type because a single walk of the {@code RexNode} tree decides both, and
- * splitting them into separate visitors would let the eligibility rules and the cost rules drift
- * apart — which is the failure mode where a query is judged offloadable and then costed with
- * weights for an operator the kernel library cannot actually express.
+ * <p>Note what is absent. There is no verdict here, and no threshold. The planner counts and
+ * describes; whether the work is worth moving depends on a device it cannot see, so that judgement
+ * belongs to the TaskManager that will run the task. This class used to carry a weighted scalar
+ * compared against a floor calibrated on one particular card — a hardware constant living inside
+ * Flink, which could not be right for every accelerator and could not be recalibrated without
+ * changing Flink.
+ *
+ * <p>The two are one type because a single walk of the expression tree decides both. Splitting
+ * them into separate visitors would let the eligibility rules and the counting drift apart.
  *
  * <p>Ineligible dominates: adding anything to an ineligible cost keeps the first rejection reason,
  * so the message names the expression that actually caused it rather than the last one visited.
@@ -35,41 +44,49 @@ import java.util.Objects;
 public final class RowCost {
 
     /** Eligible, no work. Identity for {@link #plus}. */
-    public static final RowCost ZERO = new RowCost(0, null);
+    public static final RowCost ZERO = new RowCost(null, null);
 
-    private final int weight;
-    private final String rejection;
+    private final @Nullable AccelWorkProfile work;
+    private final @Nullable String rejection;
 
-    private RowCost(int weight, String rejection) {
-        this.weight = weight;
+    private RowCost(@Nullable AccelWorkProfile work, @Nullable String rejection) {
+        this.work = work;
         this.rejection = rejection;
     }
 
-    public static RowCost of(int weight) {
-        if (weight < 0) {
-            throw new IllegalArgumentException("weight must be non-negative, was " + weight);
-        }
-        return weight == 0 ? ZERO : new RowCost(weight, null);
+    /** Eligible, performing the given work per row. */
+    public static RowCost of(AccelWorkProfile work) {
+        return new RowCost(Objects.requireNonNull(work), null);
     }
 
     /**
-     * @param reason what about the expression cannot be expressed as a kernel; surfaced in EXPLAIN
+     * @param reason what about the expression cannot be represented; surfaced in EXPLAIN
      */
     public static RowCost ineligible(String reason) {
-        return new RowCost(0, Objects.requireNonNull(reason));
+        return new RowCost(null, Objects.requireNonNull(reason));
     }
 
     public boolean isEligible() {
         return rejection == null;
     }
 
-    /** Estimated weighted operations per row. Meaningless unless {@link #isEligible()}. */
-    public int weight() {
-        return weight;
+    /**
+     * The work this subtree performs per input row, counted per operation.
+     *
+     * <p>Null for {@link #ZERO} and for an ineligible cost. A provider weighs these counts with its
+     * own hardware's costs; Flink does not weigh them at all.
+     */
+    public @Nullable AccelWorkProfile work() {
+        return work;
+    }
+
+    /** Total operations per row, or 0 when there is no work. For logs and EXPLAIN. */
+    public int opsPerRow() {
+        return work == null ? 0 : work.totalOpsPerRow();
     }
 
     /** Null when eligible. */
-    public String rejection() {
+    public @Nullable String rejection() {
         return rejection;
     }
 
@@ -80,12 +97,20 @@ public final class RowCost {
         if (!other.isEligible()) {
             return other;
         }
-        return of(weight + other.weight);
+        if (work == null) {
+            return other;
+        }
+        if (other.work == null) {
+            return this;
+        }
+        return of(work.plus(other.work));
     }
 
     @Override
     public String toString() {
-        return isEligible() ? "RowCost[" + weight + "]" : "RowCost[ineligible: " + rejection + "]";
+        return isEligible()
+                ? "RowCost[" + (work == null ? "no work" : work.toString()) + "]"
+                : "RowCost[ineligible: " + rejection + "]";
     }
 
     @Override
@@ -94,11 +119,11 @@ public final class RowCost {
             return false;
         }
         RowCost other = (RowCost) o;
-        return other.weight == weight && Objects.equals(other.rejection, rejection);
+        return Objects.equals(other.work, work) && Objects.equals(other.rejection, rejection);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(weight, rejection);
+        return Objects.hash(work, rejection);
     }
 }

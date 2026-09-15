@@ -69,16 +69,16 @@ class GpuOffloadExplainIT {
     }
 
     @Test
-    @DisplayName("a rejected query says why, naming the cost and the floor")
+    @DisplayName("a cheap query reports its work, and says where the decision is made")
     void rejectionIsExplained() {
         tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
         String plan = tEnv.explainSql(CHEAP);
 
         assertTrue(plan.contains("== GPU Offload =="), plan);
-        assertTrue(plan.contains("CPU"), plan);
-        assertTrue(plan.contains("below cost floor"), plan);
-        // The numbers matter: "3 < 96" tells the user how far off they are and what to change.
-        assertTrue(plan.contains("3 < 96"), plan);
+        // A cheap expression is eligible now: whether three operations pay depends on a device the
+        // planner cannot see, so EXPLAIN reports the work and says where the decision happens.
+        assertTrue(plan.contains("TIMESx1"), plan);
+        assertTrue(plan.contains("TaskManager"), plan);
     }
 
     @Test
@@ -95,7 +95,7 @@ class GpuOffloadExplainIT {
         // whichever TaskManager gets the task, and is settled there. A plan that said CPU because
         // the *client* had no provider was answering for the wrong machine.
         assertTrue(plan.contains("GPU  subtree 0"), plan);
-        assertTrue(plan.contains("clears floor"), plan);
+        assertTrue(plan.contains("eligible"), plan);
         assertFalse(plan.contains("no GpuOperatorFactoryProvider"), plan);
     }
 

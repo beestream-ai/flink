@@ -103,15 +103,18 @@ class GpuOffloadPlanIT {
         assertTrue(cost.isEligible(), cost::rejection);
         // one multiply, one add, one comparison -- the same 3 the unit test predicts from a
         // hand-built tree, confirming expressions arrive expanded rather than as RexLocalRef.
-        assertEquals(3, cost.weight());
+        assertEquals(3, cost.opsPerRow());
 
+        // It measures 0.54x against CPU, and it is still eligible: whether three operations pay
+        // depends on a device the planner cannot see. The refusal now happens on the TaskManager.
         GpuOffloadDecision.Verdict v =
-                GpuOffloadDecision.withDefaults().forSubtree(Collections.singletonList(cost));
-        assertFalse(v.offload(), "measured 0.54x against CPU; must not be offloaded");
+                new GpuOffloadDecision().forSubtree(Collections.singletonList(cost));
+        assertTrue(v.offload(), v::reason);
+        assertTrue(v.reason().contains("TaskManager"), v::reason);
     }
 
     @Test
-    @DisplayName("a transcendental-heavy query clears the floor")
+    @DisplayName("a transcendental-heavy query is eligible and reports its work")
     void heavyQueryIsAccepted() {
         RowCost cost =
                 costOfCalc(
@@ -120,7 +123,7 @@ class GpuOffloadPlanIT {
 
         assertTrue(cost.isEligible(), cost::rejection);
         GpuOffloadDecision.Verdict v =
-                GpuOffloadDecision.withDefaults().forSubtree(Collections.singletonList(cost));
+                new GpuOffloadDecision().forSubtree(Collections.singletonList(cost));
         assertTrue(v.offload(), v::reason);
     }
 
@@ -134,7 +137,7 @@ class GpuOffloadPlanIT {
 
         assertFalse(cost.isEligible());
         GpuOffloadDecision.Verdict v =
-                GpuOffloadDecision.withDefaults().forSubtree(Collections.singletonList(cost));
+                new GpuOffloadDecision().forSubtree(Collections.singletonList(cost));
         assertTrue(v.reason().contains("not expressible on device"), v::reason);
     }
 }

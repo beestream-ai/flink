@@ -55,8 +55,6 @@ class GpuSubstitutionIT {
         tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
         // Floors of 1 so even a trivial expression is selected, isolating the fallback from the
         // cost decision.
-        tEnv.getConfig().set(GpuOffloadOptions.MIN_ROW_COST, 1);
-        tEnv.getConfig().set(GpuOffloadOptions.MIN_TOTAL_WORK, 1L);
 
         String sql = "SELECT id, val, val * 2.0 + 1.0 AS scaled FROM t WHERE val > 0.5";
 
@@ -91,7 +89,6 @@ class GpuSubstitutionIT {
                 "CREATE TABLE s (word STRING, n INT) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '10')");
         tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
-        tEnv.getConfig().set(GpuOffloadOptions.MIN_ROW_COST, 1);
 
         String plan = tEnv.explainSql("SELECT word, n + 1 AS m FROM s WHERE n > 0");
 

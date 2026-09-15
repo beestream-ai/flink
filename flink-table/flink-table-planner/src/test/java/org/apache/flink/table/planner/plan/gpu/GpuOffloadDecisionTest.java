@@ -18,6 +18,8 @@
 
 package org.apache.flink.table.planner.plan.gpu;
 
+import org.apache.flink.table.accelerator.AccelFunction;
+
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
@@ -27,17 +29,31 @@ import org.apache.calcite.sql.type.SqlTypeName;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.math.BigDecimal;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * What the planner may and may not decide.
+ *
+ * <p>This class used to test two calibrated floors — 96 weighted operations per row, ten million
+ * total — and the arithmetic of comparing a score against them. Those floors were a model of one
+ * RTX 4070 living inside Flink, and predicting the behaviour of hardware the client cannot see.
+ * They are gone, and so are the tests for them.
+ *
+ * <p>What remains is the half the planner is actually qualified to judge: whether a subtree can be
+ * represented at all, and how much work it performs. Whether that work is worth moving is decided
+ * on the TaskManager, against a device, and is tested there.
+ */
 class GpuOffloadDecisionTest {
 
     private final RelDataTypeFactory types = new JavaTypeFactoryImpl();
     private final RexBuilder rex = new RexBuilder(types);
+    private final GpuOffloadDecision decision = new GpuOffloadDecision();
 
     private RexNode val() {
         return rex.makeInputRef(types.createSqlType(SqlTypeName.DOUBLE), 1);
@@ -47,212 +63,124 @@ class GpuOffloadDecisionTest {
         return rex.makeLiteral(BigDecimal.valueOf(v), types.createSqlType(SqlTypeName.DOUBLE));
     }
 
-    @Test
-    @DisplayName("the measured-losing query is rejected, and the reason says why")
-    void rejectsTheCheapQuery() {
-        RexNode projection =
-                rex.makeCall(
-                        SqlStdOperatorTable.PLUS,
-                        rex.makeCall(SqlStdOperatorTable.MULTIPLY, val(), lit(2.0)),
-                        lit(1.0));
-        RexNode condition = rex.makeCall(SqlStdOperatorTable.GREATER_THAN, val(), lit(0.5));
-
-        GpuOffloadDecision.Verdict v =
-                GpuOffloadDecision.withDefaults().decide(List.of(projection, condition));
-
-        assertFalse(v.offload(), "the 2-flop query measured 0.54x and must not be offloaded");
-        assertEquals(3, v.rowCost());
-        assertTrue(v.reason().contains("below cost floor"), v::reason);
+    /** {@code val * 2.0 + 1.0}: three operations, measured at 0.54x against CPU. */
+    private RexNode cheap() {
+        return rex.makeCall(
+                SqlStdOperatorTable.PLUS,
+                rex.makeCall(SqlStdOperatorTable.MULTIPLY, val(), lit(2.0)),
+                lit(1.0));
     }
 
-    /** SQRT(SQRT(...)) nested deeply enough to clear the per-row floor on its own. */
     private RexNode heavy() {
-        RexNode expr = val();
-        for (int i = 0; i < 20; i++) {
-            expr = rex.makeCall(SqlStdOperatorTable.SQRT, expr);
+        return rex.makeCall(
+                SqlStdOperatorTable.PLUS,
+                rex.makeCall(SqlStdOperatorTable.SQRT, val()),
+                rex.makeCall(SqlStdOperatorTable.EXP, val()));
+    }
+
+    @Test
+    @DisplayName("an expressible subtree is eligible, and the verdict carries the work")
+    void expressibleIsEligible() {
+        GpuOffloadDecision.Verdict v = decision.decide(Collections.singletonList(heavy()));
+
+        assertThat(v.offload()).isTrue();
+        assertThat(v.work()).isNotNull();
+        assertThat(v.work().count(AccelFunction.SQRT)).isEqualTo(1);
+        assertThat(v.work().count(AccelFunction.EXP)).isEqualTo(1);
+        assertThat(v.work().count(AccelFunction.PLUS)).isEqualTo(1);
+        assertThat(v.opsPerRow()).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("the query measured at 0.54x is still eligible: cheapness is not the planner's call")
+    void cheapIsStillEligible() {
+        // The old behaviour was to refuse this at plan time against a floor of 96. That refusal
+        // was right about the outcome and wrong about the authority: the client cannot know what
+        // device will run it, or whether that device is fast enough to make three operations pay.
+        GpuOffloadDecision.Verdict v = decision.decide(Collections.singletonList(cheap()));
+
+        assertThat(v.offload()).isTrue();
+        assertThat(v.opsPerRow()).isEqualTo(2);
+        assertThat(v.reason()).contains("TaskManager");
+    }
+
+    @Test
+    @DisplayName("an inexpressible subtree is refused, and the reason names what stopped it")
+    void inexpressibleIsRefused() {
+        RexNode decimalColumn = rex.makeInputRef(types.createSqlType(SqlTypeName.DECIMAL, 10, 2), 0);
+
+        GpuOffloadDecision.Verdict v = decision.decide(Collections.singletonList(decimalColumn));
+
+        assertThat(v.offload()).isFalse();
+        assertThat(v.work()).isNull();
+        assertThat(v.reason()).contains("not expressible on device");
+    }
+
+    @Test
+    @DisplayName("a pure projection has nothing to move")
+    void pureProjectionIsRefused() {
+        GpuOffloadDecision.Verdict v = decision.decide(Collections.singletonList(val()));
+
+        assertThat(v.offload()).isFalse();
+        assertThat(v.reason()).contains("no arithmetic");
+    }
+
+    @Test
+    @DisplayName("a subtree's work is the sum of its members'")
+    void subtreeWorkSums() {
+        RowCost one = GpuCostEstimator.estimateAll(Collections.singletonList(heavy()));
+        RowCost two = GpuCostEstimator.estimateAll(Collections.singletonList(heavy()));
+
+        GpuOffloadDecision.Verdict v = decision.forSubtree(Arrays.asList(one, two));
+
+        assertThat(v.offload()).isTrue();
+        assertThat(v.work().count(AccelFunction.SQRT)).isEqualTo(2);
+        assertThat(v.opsPerRow()).isEqualTo(6);
+    }
+
+    @Test
+    @DisplayName("one ineligible member poisons the subtree, and its reason is the one reported")
+    void ineligibleMemberPoisonsSubtree() {
+        RowCost good = GpuCostEstimator.estimateAll(Collections.singletonList(heavy()));
+        RowCost bad = RowCost.ineligible("a very specific reason");
+
+        GpuOffloadDecision.Verdict v = decision.forSubtree(Arrays.asList(good, bad));
+
+        assertThat(v.offload()).isFalse();
+        assertThat(v.reason()).contains("a very specific reason");
+    }
+
+    @Test
+    @DisplayName("a fallback keeps the work, so EXPLAIN can still say what the node was worth")
+    void fallbackKeepsTheWork() {
+        GpuOffloadDecision.Verdict selected = decision.decide(Collections.singletonList(heavy()));
+
+        GpuOffloadDecision.Verdict fell =
+                GpuOffloadDecision.fallback(selected, "no provider on this TaskManager");
+
+        assertThat(fell.offload()).isFalse();
+        assertThat(fell.work()).isEqualTo(selected.work());
+        assertThat(fell.reason()).contains("selected but fell back");
+        assertThat(fell.reason()).contains("no provider");
+    }
+
+    @Test
+    @DisplayName("no device constant survives anywhere on this class")
+    void noDeviceConstants() {
+        // The property the FLIP rests on: Flink holds no calibrated hardware number. A threshold
+        // reintroduced here would be invisible in a diff and would undo the whole argument.
+        for (Field field : GpuOffloadDecision.class.getDeclaredFields()) {
+            assertThat(field.getName().toUpperCase())
+                    .as("field " + field.getName())
+                    .doesNotContain("MIN_")
+                    .doesNotContain("FLOOR")
+                    .doesNotContain("BREAK_EVEN")
+                    .doesNotContain("THRESHOLD");
         }
-        return expr;
-    }
-
-    @Test
-    @DisplayName("a heavy expression over too few rows is refused, however heavy")
-    void tooFewRowsToRepayCompilation() {
-        GpuOffloadDecision.Verdict v =
-                GpuOffloadDecision.withDefaults().decide(List.of(heavy()), 100);
-
-        assertFalse(v.offload(), "clearing the per-row floor says nothing about a 100-row table");
-        assertTrue(v.reason().contains("below total-work floor"), v::reason);
-    }
-
-    @Test
-    @DisplayName("the same expression over enough rows is accepted")
-    void enoughRowsToRepayCompilation() {
-        GpuOffloadDecision.Verdict v =
-                GpuOffloadDecision.withDefaults().decide(List.of(heavy()), 10_000_000);
-
-        assertTrue(v.offload(), v::reason);
-        assertTrue(v.reason().contains("weighted ops against a floor"), v::reason);
-    }
-
-    @Test
-    @DisplayName("an unknown row count skips the total-work floor rather than guessing")
-    void unknownRowCountSkipsTheSecondGate() {
-        GpuOffloadDecision.Verdict v = GpuOffloadDecision.withDefaults().decide(List.of(heavy()));
-
-        assertTrue(v.offload(), v::reason);
-        assertTrue(v.reason().contains("row count unknown"), v::reason);
-    }
-
-    @Test
-    @DisplayName("the per-row floor still rejects first: a cheap expression over many rows")
-    void perRowFloorIsNotBoughtOffByVolume() {
-        RexNode cheap = rex.makeCall(SqlStdOperatorTable.MULTIPLY, val(), lit(2.0));
-
-        GpuOffloadDecision.Verdict v =
-                GpuOffloadDecision.withDefaults().decide(List.of(cheap), 1_000_000_000L);
-
-        assertFalse(v.offload(), "a billion rows does not make a 1-flop expression worth staging");
-        assertTrue(v.reason().contains("below cost floor"), v::reason);
-    }
-
-    @Test
-    @DisplayName("an unambiguously heavy expression is accepted")
-    void acceptsHeavyWork() {
-        // EXP(val)^2 * LN(val) * SIN(val) * COS(val) * ATAN(val)
-        RexNode heavy =
-                rex.makeCall(
-                        SqlStdOperatorTable.MULTIPLY,
-                        rex.makeCall(
-                                SqlStdOperatorTable.MULTIPLY,
-                                rex.makeCall(
-                                        SqlStdOperatorTable.POWER,
-                                        rex.makeCall(SqlStdOperatorTable.EXP, val()),
-                                        lit(2.0)),
-                                rex.makeCall(
-                                        SqlStdOperatorTable.MULTIPLY,
-                                        rex.makeCall(SqlStdOperatorTable.LN, val()),
-                                        rex.makeCall(SqlStdOperatorTable.SIN, val()))),
-                        rex.makeCall(
-                                SqlStdOperatorTable.MULTIPLY,
-                                rex.makeCall(SqlStdOperatorTable.COS, val()),
-                                rex.makeCall(SqlStdOperatorTable.ATAN, val())));
-
-        GpuOffloadDecision.Verdict v = GpuOffloadDecision.withDefaults().decide(List.of(heavy));
-
-        assertTrue(v.offload(), v::reason);
-        assertTrue(v.rowCost() >= GpuOffloadDecision.DEFAULT_MIN_ROW_COST);
-    }
-
-    @Test
-    @DisplayName("the conservative floor knowingly rejects expressions above break-even")
-    void floorGivesUpWinsBetweenBreakEvenAndFloor() {
-        // POWER(EXP(val), 2.0) + LN(val) * SIN(val)  ->  86 weighted ops/row.
-        // Above the interpolated break-even of ~70, below the 96 default. Offloading it would
-        // probably win, and the default declines anyway. This test exists so that trade-off is
-        // visible and deliberate rather than discovered later as a surprise.
-        RexNode borderline =
-                rex.makeCall(
-                        SqlStdOperatorTable.PLUS,
-                        rex.makeCall(
-                                SqlStdOperatorTable.POWER,
-                                rex.makeCall(SqlStdOperatorTable.EXP, val()),
-                                lit(2.0)),
-                        rex.makeCall(
-                                SqlStdOperatorTable.MULTIPLY,
-                                rex.makeCall(SqlStdOperatorTable.LN, val()),
-                                rex.makeCall(SqlStdOperatorTable.SIN, val())));
-
-        int cost = GpuCostEstimator.estimate(borderline).weight();
-        assertEquals(86, cost);
-        assertTrue(
-                cost > GpuOffloadDecision.MEASURED_BREAK_EVEN,
-                "this expression is above measured break-even");
-
-        assertFalse(
-                GpuOffloadDecision.withDefaults().decide(List.of(borderline)).offload(),
-                "the conservative default declines it anyway");
-        assertTrue(
-                new GpuOffloadDecision(GpuOffloadDecision.MEASURED_BREAK_EVEN)
-                        .decide(List.of(borderline))
-                        .offload(),
-                "a floor calibrated at break-even would take it");
-    }
-
-    @Test
-    @DisplayName("ineligible types are refused before the floor is even consulted")
-    void ineligibilityBeatsTheFloor() {
-        RexNode word = rex.makeInputRef(types.createSqlType(SqlTypeName.VARCHAR, 100), 0);
-
-        GpuOffloadDecision.Verdict v = new GpuOffloadDecision(0).decide(List.of(word));
-
-        assertFalse(v.offload(), "a zero floor must not make an inexpressible type offloadable");
-        assertTrue(v.reason().contains("not expressible on device"), v::reason);
-    }
-
-    @Test
-    @DisplayName("a subtree clears a floor that none of its nodes clears alone")
-    void fusionRaisesTheNumerator() {
-        // Three nodes at 40 each: individually below a floor of 96, together above it.
-        List<RowCost> nodes = List.of(RowCost.of(40), RowCost.of(40), RowCost.of(40));
-        GpuOffloadDecision decision = GpuOffloadDecision.withDefaults();
-
-        assertFalse(decision.forSubtree(List.of(RowCost.of(40))).offload());
-        assertTrue(decision.forSubtree(nodes).offload());
-        assertEquals(120, decision.forSubtree(nodes).rowCost());
-    }
-
-    @Test
-    @DisplayName("the total-work floor is applied per subtask, since each pays its own compile")
-    void totalWorkIsPerSubtask() {
-        // 200 rows x 100 ops = 20,000 against a floor of 10,000: clears it as one task, and does
-        // not once the same rows are split eight ways.
-        List<RowCost> node = List.of(RowCost.of(100));
-
-        assertTrue(new GpuOffloadDecision(96, 10_000).forSubtree(node, 200).offload());
-        assertTrue(new GpuOffloadDecision(96, 10_000, 1).forSubtree(node, 200).offload());
-        assertFalse(new GpuOffloadDecision(96, 10_000, 8).forSubtree(node, 200).offload());
-    }
-
-    @Test
-    @DisplayName("and says so, so the reason is not mistaken for the whole job's row count")
-    void perSubtaskVerdictNamesTheSplit() {
-        GpuOffloadDecision.Verdict v =
-                new GpuOffloadDecision(96, 10_000, 8).forSubtree(List.of(RowCost.of(100)), 200);
-
-        assertFalse(v.offload());
-        assertTrue(v.reason().contains("across 8 subtasks"), v.reason());
-        assertTrue(v.reason().contains("25 rows"), v.reason());
-    }
-
-    /** An unset or single parallelism must leave the old arithmetic exactly as it was. */
-    @Test
-    @DisplayName("an unknown parallelism does not divide anything")
-    void unknownParallelismChangesNothing() {
-        List<RowCost> node = List.of(RowCost.of(100));
-        String withoutIt = GpuOffloadDecision.withDefaults().forSubtree(node, 200_000).reason();
-        String withUnknown =
-                new GpuOffloadDecision(
-                                GpuOffloadDecision.DEFAULT_MIN_ROW_COST,
-                                GpuOffloadDecision.DEFAULT_MIN_TOTAL_WORK,
-                                GpuOffloadDecision.UNKNOWN_PARALLELISM)
-                        .forSubtree(node, 200_000)
-                        .reason();
-
-        assertEquals(withoutIt, withUnknown);
-    }
-
-    @Test
-    @DisplayName("one ineligible node poisons the whole subtree")
-    void ineligibleNodePoisonsSubtree() {
-        GpuOffloadDecision.Verdict v =
-                GpuOffloadDecision.withDefaults()
-                        .forSubtree(
-                                List.of(
-                                        RowCost.of(200),
-                                        RowCost.ineligible("VARCHAR"),
-                                        RowCost.of(200)));
-
-        assertFalse(v.offload());
-        assertTrue(v.reason().contains("VARCHAR"), v::reason);
+        List<String> methods =
+                Arrays.stream(GpuOffloadDecision.class.getDeclaredMethods())
+                        .map(m -> m.getName().toLowerCase())
+                        .collect(java.util.stream.Collectors.toList());
+        assertThat(methods).noneMatch(m -> m.contains("floor") || m.contains("threshold"));
     }
 }

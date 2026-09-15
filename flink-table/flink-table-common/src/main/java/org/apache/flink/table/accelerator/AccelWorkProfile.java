@@ -77,6 +77,32 @@ public final class AccelWorkProfile implements Serializable {
         return opsPerRow[function.ordinal()];
     }
 
+    /**
+     * The work of two subtrees that run as one.
+     *
+     * <p>Operations add; bytes per row do not. A group's members see the same rows, so the widest
+     * input width is what the group actually stages, and the last member's output is what leaves
+     * it. Row counts take the larger estimate, or unknown if either is unknown -- guessing there
+     * would be worse than admitting ignorance.
+     */
+    public AccelWorkProfile plus(AccelWorkProfile other) {
+        int[] sum = opsPerRow.clone();
+        for (int i = 0; i < sum.length; i++) {
+            sum[i] += other.opsPerRow[i];
+        }
+        long rows;
+        if (estimatedRows == UNKNOWN_ROWS || other.estimatedRows == UNKNOWN_ROWS) {
+            rows = UNKNOWN_ROWS;
+        } else {
+            rows = Math.max(estimatedRows, other.estimatedRows);
+        }
+        return new AccelWorkProfile(
+                sum,
+                Math.max(inputBytesPerRow, other.inputBytesPerRow),
+                other.outputBytesPerRow,
+                rows);
+    }
+
     /** Every count, indexed by {@link AccelFunction#ordinal()}. */
     public int[] opsPerRow() {
         return opsPerRow.clone();

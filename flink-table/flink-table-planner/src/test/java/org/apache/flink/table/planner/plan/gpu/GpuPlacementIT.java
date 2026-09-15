@@ -114,8 +114,16 @@ class GpuPlacementIT {
     /** A node that was never selected must not drag a device requirement onto the job. */
     @Test
     @DisplayName("a query that does not offload asks for nothing, even half-configured")
-    void asksForNothingWhenNothingOffloads() {
+    void requiringADeviceDemandsAWholeSlotSpecification() {
         tEnv.getConfig().set(GpuOffloadOptions.REQUIRE_DEVICE, true);
-        assertDoesNotThrow(() -> tEnv.explainSql(CHEAP));
+
+        // Every expressible query is eligible now, so asking for a device is no longer something
+        // only heavy queries trigger. Flink rejects a slot sharing group naming an external
+        // resource without cpu and heap, and the planner has no basis for inventing either, so it
+        // fails here naming both options rather than deeper inside SlotSharingGroup.build().
+        IllegalArgumentException thrown =
+                assertThrows(IllegalArgumentException.class, () -> tEnv.explainSql(CHEAP));
+        assertTrue(thrown.getMessage().contains("cpu-cores"), thrown::getMessage);
+        assertTrue(thrown.getMessage().contains("task-heap"), thrown::getMessage);
     }
 }

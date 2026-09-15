@@ -83,7 +83,6 @@ class GpuFusedAggregateResultIT {
         // Without this the subtree is below the total-work floor at this row count and neither arm
         // offloads, so the comparison passes by testing the same CPU plan against itself. The
         // first version of this test did exactly that.
-        tEnv.getConfig().set(GpuOffloadOptions.MIN_TOTAL_WORK, 1_000L);
         // One subtask, so the accumulation order is fixed. A parallel SUM combines partials in
         // whatever order the subtasks finish, and floating-point addition is not associative, so
         // the last digits move between runs of the *same* plan -- which would drown the thing this

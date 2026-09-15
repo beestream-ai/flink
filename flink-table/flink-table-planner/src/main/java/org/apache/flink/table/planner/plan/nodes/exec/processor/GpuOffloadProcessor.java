@@ -19,7 +19,6 @@
 package org.apache.flink.table.planner.plan.nodes.exec.processor;
 
 import org.apache.flink.table.api.TableConfig;
-import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadOptions;
@@ -75,11 +74,8 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
         if (!config.get(GpuOffloadOptions.ENABLED)) {
             return execGraph;
         }
-        GpuOffloadDecision decision =
-                new GpuOffloadDecision(
-                        config.get(GpuOffloadOptions.MIN_ROW_COST),
-                        config.get(GpuOffloadOptions.MIN_TOTAL_WORK),
-                        config.get(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM));
+        // No thresholds: the planner decides what is expressible, not what is worth moving.
+        GpuOffloadDecision decision = new GpuOffloadDecision();
 
         List<ExecNode<?>> order = topologicalOrder(execGraph);
         Map<ExecNode<?>, Integer> consumerCount = countConsumers(order);
@@ -102,8 +98,7 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
                         node,
                         new GpuOffloadAssignment(
                                 NO_GROUP,
-                                decision.forSubtree(
-                                        Collections.singletonList(cost), rowCountOf(node))));
+                                decision.forSubtree(Collections.singletonList(cost))));
                 continue;
             }
             costs.put(node, cost);
@@ -135,7 +130,7 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
                 memberCosts.add(costs.get(member));
             }
             GpuOffloadDecision.Verdict verdict =
-                    decision.forSubtree(memberCosts, rowCountOf(entry.getValue()));
+                    decision.forSubtree(memberCosts);
             for (ExecNode<?> member : entry.getValue()) {
                 assign(member, new GpuOffloadAssignment(entry.getKey(), verdict));
             }
