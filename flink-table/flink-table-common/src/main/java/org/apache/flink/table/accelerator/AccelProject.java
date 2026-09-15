@@ -35,8 +35,7 @@ public final class AccelProject extends AccelNode {
     private final AccelNode input;
     private final RowType outputType;
 
-    public AccelProject(
-            List<AccelExpression> projections, AccelNode input, RowType outputType) {
+    public AccelProject(List<AccelExpression> projections, AccelNode input, RowType outputType) {
         this.projections = Collections.unmodifiableList(new ArrayList<>(projections));
         this.input = input;
         this.outputType = outputType;

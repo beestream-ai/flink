@@ -27,13 +27,12 @@ import java.io.Serializable;
  * One node of an accelerator IR expression tree.
  *
  * <p>The type system is Flink's own {@link LogicalType} rather than a parallel invention: it is
- * already independent of the optimizer's own expression representation, already
- * serializable, and already carries {@link
- * LogicalType#isNullable()} — which is precisely what a provider needs and what the current
- * offload path does not look at.
+ * already independent of the optimizer's own expression representation, already serializable, and
+ * already carries {@link LogicalType#isNullable()} — which is precisely what a provider needs and
+ * what the current offload path does not look at.
  *
- * <p>Serializable because the IR travels in the JobGraph: the planner builds it on the client and
- * a TaskManager hands it to a provider.
+ * <p>Serializable because the IR travels in the JobGraph: the planner builds it on the client and a
+ * TaskManager hands it to a provider.
  *
  * <p>The constructor is package-private. That is this module's stand-in for {@code sealed}, which
  * Java 11 does not have: the hierarchy is closed to implementors outside this package.

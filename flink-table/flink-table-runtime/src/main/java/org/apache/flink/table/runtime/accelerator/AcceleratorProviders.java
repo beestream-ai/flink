@@ -39,16 +39,16 @@ public final class AcceleratorProviders {
     /**
      * Loads the single provider visible to {@code classLoader}.
      *
-     * <p>Absence is the common case and is not an error: most TaskManagers in most clusters have
-     * no accelerator, and a job must run there unchanged.
+     * <p>Absence is the common case and is not an error: most TaskManagers in most clusters have no
+     * accelerator, and a job must run there unchanged.
      *
      * <p>Not cached. This runs once per offloaded subtask as its operator is built, and holding a
      * provider in a static field would outlive the user classloader that supplied it.
      *
      * <p>Every failure mode is swallowed deliberately. A service file naming a class that is not
      * present, a provider whose static initialiser cannot find a native library, a provider built
-     * against an IR this Flink no longer emits -- each is a reason to run on the CPU, and none is
-     * a reason to fail a job.
+     * against an IR this Flink no longer emits -- each is a reason to run on the CPU, and none is a
+     * reason to fail a job.
      */
     public static Optional<AcceleratorProvider> find(ClassLoader classLoader) {
         try {

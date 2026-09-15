@@ -33,15 +33,43 @@ import org.apache.flink.annotation.PublicEvolving;
  */
 @PublicEvolving
 public enum AccelFunction {
-    PLUS, MINUS, TIMES, DIVIDE, NEGATE,
+    PLUS,
+    MINUS,
+    TIMES,
+    DIVIDE,
+    NEGATE,
 
-    EQUALS, NOT_EQUALS, LESS_THAN, LESS_OR_EQUAL, GREATER_THAN, GREATER_OR_EQUAL,
+    EQUALS,
+    NOT_EQUALS,
+    LESS_THAN,
+    LESS_OR_EQUAL,
+    GREATER_THAN,
+    GREATER_OR_EQUAL,
 
-    AND, OR, NOT,
+    AND,
+    OR,
+    NOT,
 
-    ABS, SQRT, EXP, LN, LOG2, POWER,
+    ABS,
+    SQRT,
+    EXP,
+    LN,
+    LOG2,
+    POWER,
 
-    SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, TANH,
+    SIN,
+    COS,
+    TAN,
+    ASIN,
+    ACOS,
+    ATAN,
+    ATAN2,
+    TANH,
 
-    FLOOR, CEIL, SIGN, LEAST, GREATEST, CAST
+    FLOOR,
+    CEIL,
+    SIGN,
+    LEAST,
+    GREATEST,
+    CAST
 }

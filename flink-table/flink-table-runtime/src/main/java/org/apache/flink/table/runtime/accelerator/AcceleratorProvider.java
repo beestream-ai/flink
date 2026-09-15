@@ -31,9 +31,9 @@ import java.util.Optional;
  * An execution backend Flink can delegate a plan subtree to.
  *
  * <p>Discovered with {@code ServiceLoader}. Flink references nothing an implementation depends on:
- * no accelerator framework, no device API, no vendor package. An implementation is free to be a
- * GPU runtime, an FPGA bitstream loader, or a hand-written SIMD library -- Flink learns one
- * throughput ratio and two absolute costs, and nothing else.
+ * no accelerator framework, no device API, no vendor package. An implementation is free to be a GPU
+ * runtime, an FPGA bitstream loader, or a hand-written SIMD library -- Flink learns one throughput
+ * ratio and two absolute costs, and nothing else.
  *
  * <h2>Everything here happens on the TaskManager</h2>
  *
@@ -61,19 +61,19 @@ public interface AcceleratorProvider {
      * The highest {@link AccelIrVersion} this provider understands.
      *
      * <p>Java 11 has no sealed types, so the IR hierarchy is closed by package-private
-     * constructors: nothing outside Flink can add a node kind. What that cannot catch is a
-     * provider compiled against an older IR meeting a newer Flink, which would otherwise surface
-     * as an unexplained refusal or, worse, a node silently ignored. Declaring the version turns
-     * that into a clean rejection at lookup.
+     * constructors: nothing outside Flink can add a node kind. What that cannot catch is a provider
+     * compiled against an older IR meeting a newer Flink, which would otherwise surface as an
+     * unexplained refusal or, worse, a node silently ignored. Declaring the version turns that into
+     * a clean rejection at lookup.
      */
     int supportedIrVersion();
 
     /**
      * Can this provider serve the subtree on this machine, and at what cost?
      *
-     * <p>Returning empty is an ordinary answer, not a failure. No device present, a driver that
-     * did not load, an operation this backend cannot express, a shape whose arithmetic per byte
-     * makes it not worth moving -- all of them are empty, and all of them mean Flink runs the
+     * <p>Returning empty is an ordinary answer, not a failure. No device present, a driver that did
+     * not load, an operation this backend cannot express, a shape whose arithmetic per byte makes
+     * it not worth moving -- all of them are empty, and all of them mean Flink runs the
      * code-generated operator it carried alongside and records why.
      *
      * <p>Implementations must not throw. This is called while a task is starting, and an exception

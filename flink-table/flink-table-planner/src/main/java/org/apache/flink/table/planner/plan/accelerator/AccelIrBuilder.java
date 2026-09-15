@@ -20,11 +20,11 @@ package org.apache.flink.table.planner.plan.accelerator;
 
 import org.apache.flink.table.accelerator.AccelCall;
 import org.apache.flink.table.accelerator.AccelExpression;
+import org.apache.flink.table.accelerator.AccelFilter;
 import org.apache.flink.table.accelerator.AccelFunction;
+import org.apache.flink.table.accelerator.AccelInput;
 import org.apache.flink.table.accelerator.AccelInputRef;
 import org.apache.flink.table.accelerator.AccelLiteral;
-import org.apache.flink.table.accelerator.AccelFilter;
-import org.apache.flink.table.accelerator.AccelInput;
 import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.accelerator.AccelProject;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
@@ -77,8 +77,8 @@ public final class AccelIrBuilder {
      *
      * <p>Built-ins reach the planner as {@code OTHER_FUNCTION} with no distinguishing kind, so the
      * name is the only handle Calcite offers. The safety this loses is bought back by {@link
-     * #isBuiltIn}: a name is accepted only when the operator is a built-in rather than something
-     * a user registered under the same name.
+     * #isBuiltIn}: a name is accepted only when the operator is a built-in rather than something a
+     * user registered under the same name.
      */
     private static final Map<String, AccelFunction> BY_BUILT_IN_NAME = new HashMap<>();
 
@@ -191,8 +191,8 @@ public final class AccelIrBuilder {
     /**
      * Whether this call has an IR representation at all.
      *
-     * <p>The single admission list. Before this existed the vocabulary was stated three times --
-     * in the cost estimator's weight table, in the kernel generator's switch, and implicitly in
+     * <p>The single admission list. Before this existed the vocabulary was stated three times -- in
+     * the cost estimator's weight table, in the kernel generator's switch, and implicitly in
      * whatever the runtime could execute -- and nothing kept them in step.
      */
     public static boolean supports(RexCall call) {
@@ -232,15 +232,16 @@ public final class AccelIrBuilder {
             // costed and executed as the built-in it is impersonating.
             return null;
         }
-        return BY_BUILT_IN_NAME.get(call.getOperator().getName().toUpperCase(java.util.Locale.ROOT));
+        return BY_BUILT_IN_NAME.get(
+                call.getOperator().getName().toUpperCase(java.util.Locale.ROOT));
     }
 
     /**
      * Whether the call's operator is one Flink or Calcite defines, rather than one a user
      * registered.
      *
-     * <p>This is the check that makes a name safe to use. A catalog function reaches the planner
-     * as a {@link BridgingSqlFunction} whose definition is <em>not</em> a {@link
+     * <p>This is the check that makes a name safe to use. A catalog function reaches the planner as
+     * a {@link BridgingSqlFunction} whose definition is <em>not</em> a {@link
      * BuiltInFunctionDefinition}; Flink's own functions arrive the same way but with one that is.
      * Anything straight out of Calcite's operator table is a built-in by construction.
      *

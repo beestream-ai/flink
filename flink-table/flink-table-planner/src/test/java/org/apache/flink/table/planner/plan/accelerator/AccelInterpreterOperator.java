@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 final class AccelInterpreterOperator extends AbstractStreamOperator<RowData>
         implements OneInputStreamOperator<RowData, RowData> {
 
-// One row in, at most one row out -- the same contract the code-generated Calc has.
+    // One row in, at most one row out -- the same contract the code-generated Calc has.
 
     private static final long serialVersionUID = 1L;
 

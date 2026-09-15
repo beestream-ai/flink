@@ -126,7 +126,8 @@ public final class AcceleratorChoice {
         return new Outcome(
                 offered,
                 String.format(
-                        "provider %s claims %.2fx over CPU", provider.name(), cost.speedupOverCpu()));
+                        "provider %s claims %.2fx over CPU",
+                        provider.name(), cost.speedupOverCpu()));
     }
 
     /**

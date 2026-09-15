@@ -48,11 +48,11 @@ import static org.assertj.core.api.Assertions.fail;
  * <p>The comparison demands bit equality, because both paths do the same double arithmetic with
  * {@code java.lang.Math} on the same inputs. A difference here is a defect in the IR, the
  * conversion or the interpreter — not rounding. A device-backed provider reassociates and would
- * need a stated tolerance; that belongs with the device-gated profile of task M0.7, not here,
- * where a tolerance would only hide bugs this test exists to find.
+ * need a stated tolerance; that belongs with the device-gated profile of task M0.7, not here, where
+ * a tolerance would only hide bugs this test exists to find.
  *
- * <p>NaN compares equal to NaN deliberately: {@code SQRT(-1)} is a legitimate result and both
- * paths must produce it identically.
+ * <p>NaN compares equal to NaN deliberately: {@code SQRT(-1)} is a legitimate result and both paths
+ * must produce it identically.
  */
 class DifferentialExpressionIT {
 
@@ -118,8 +118,13 @@ class DifferentialExpressionIT {
             }
         }
         System.out.println(
-                "differential: compared " + compared + " values, skipped " + skipped + "/"
-                        + QUERIES + " unplannable queries");
+                "differential: compared "
+                        + compared
+                        + " values, skipped "
+                        + skipped
+                        + "/"
+                        + QUERIES
+                        + " unplannable queries");
         if (firstSkip != null) {
             System.out.println("first unplannable query:\n" + firstSkip);
         }

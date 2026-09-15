@@ -35,8 +35,8 @@ import java.util.List;
  * Evaluates accelerator IR on the host, one row at a time.
  *
  * <p>Correctness, not speed: this exists to prove the IR carries enough to execute a subtree, and
- * to give tests an accelerator path that needs no accelerator. A real provider compiles the same
- * IR into something that runs on a device.
+ * to give tests an accelerator path that needs no accelerator. A real provider compiles the same IR
+ * into something that runs on a device.
  */
 final class AccelInterpreter {
 
@@ -172,7 +172,8 @@ final class AccelInterpreter {
             case NOT:
                 return bool(a == 0.0);
             default:
-                throw new UnsupportedOperationException("no host evaluation for " + call.function());
+                throw new UnsupportedOperationException(
+                        "no host evaluation for " + call.function());
         }
     }
 

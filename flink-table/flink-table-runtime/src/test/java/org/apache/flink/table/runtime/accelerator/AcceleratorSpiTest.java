@@ -41,13 +41,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * The shape of the accelerator SPI: what a provider is asked, what it may answer, and what Flink
  * does when there is no provider at all.
  *
- * <p>Registration through {@code META-INF/services} is exercised by the test provider of task
- * M0.5; this covers the contract itself.
+ * <p>Registration through {@code META-INF/services} is exercised by the test provider of task M0.5;
+ * this covers the contract itself.
  */
 class AcceleratorSpiTest {
 
-    private static final RowType ROW =
-            RowType.of(new DoubleType(false), new DoubleType(false));
+    private static final RowType ROW = RowType.of(new DoubleType(false), new DoubleType(false));
 
     private static AccelNode subtree() {
         return new AccelInput(ROW);
@@ -110,11 +109,11 @@ class AcceleratorSpiTest {
     }
 
     @Test
-    @DisplayName("the plan is serializable: it is built on the TaskManager but may be logged, "
-            + "cached and compared")
+    @DisplayName(
+            "the plan is serializable: it is built on the TaskManager but may be logged, "
+                    + "cached and compared")
     void planIsSerializable() {
-        AcceleratorPlan plan =
-                new StubPlan(new AcceleratorCost(2.0, 1L, 1L), "payload");
+        AcceleratorPlan plan = new StubPlan(new AcceleratorCost(2.0, 1L, 1L), "payload");
 
         assertThat(plan).isInstanceOf(Serializable.class);
         assertThat(plan.payload()).isInstanceOf(Serializable.class);
@@ -190,9 +189,7 @@ class AcceleratorSpiTest {
 
         @Override
         public Optional<AcceleratorPlan> accept(AccelNode subtree, AccelWorkProfile work) {
-            return cost == null
-                    ? Optional.empty()
-                    : Optional.of(new StubPlan(cost, "compiled"));
+            return cost == null ? Optional.empty() : Optional.of(new StubPlan(cost, "compiled"));
         }
 
         @Override

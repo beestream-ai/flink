@@ -92,7 +92,8 @@ class GpuOffloadDecisionTest {
     }
 
     @Test
-    @DisplayName("the query measured at 0.54x is still eligible: cheapness is not the planner's call")
+    @DisplayName(
+            "the query measured at 0.54x is still eligible: cheapness is not the planner's call")
     void cheapIsStillEligible() {
         // The old behaviour was to refuse this at plan time against a floor of 96. That refusal
         // was right about the outcome and wrong about the authority: the client cannot know what
@@ -107,7 +108,8 @@ class GpuOffloadDecisionTest {
     @Test
     @DisplayName("an inexpressible subtree is refused, and the reason names what stopped it")
     void inexpressibleIsRefused() {
-        RexNode decimalColumn = rex.makeInputRef(types.createSqlType(SqlTypeName.DECIMAL, 10, 2), 0);
+        RexNode decimalColumn =
+                rex.makeInputRef(types.createSqlType(SqlTypeName.DECIMAL, 10, 2), 0);
 
         GpuOffloadDecision.Verdict v = decision.decide(Collections.singletonList(decimalColumn));
 

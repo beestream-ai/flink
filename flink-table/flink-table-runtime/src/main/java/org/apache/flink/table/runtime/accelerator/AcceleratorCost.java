@@ -34,11 +34,11 @@ import java.io.Serializable;
  *
  * <p>That threshold is a <em>policy</em> constant -- how much margin Flink wants before preferring
  * an unfamiliar execution path -- and it means the same thing on a GPU, an FPGA and whatever comes
- * next. It is not a device constant, which is why it can live in Flink when {@code
- * MIN_ROW_COST = 96} could not.
+ * next. It is not a device constant, which is why it can live in Flink when {@code MIN_ROW_COST =
+ * 96} could not.
  *
- * <p>The two absolute figures that remain are ones only the provider can know and that no ratio
- * can express: what it costs before a single row is processed, and what it costs per batch.
+ * <p>The two absolute figures that remain are ones only the provider can know and that no ratio can
+ * express: what it costs before a single row is processed, and what it costs per batch.
  */
 @PublicEvolving
 public final class AcceleratorCost implements Serializable {

@@ -27,9 +27,9 @@ import java.util.List;
 /**
  * Keeps the rows for which {@code condition} is true.
  *
- * <p>SQL three-valued logic applies: a condition evaluating to UNKNOWN does not select the row.
- * A provider that cannot represent the distinction between FALSE and UNKNOWN must decline any
- * subtree whose condition can be UNKNOWN, which it can see from the operands' nullability.
+ * <p>SQL three-valued logic applies: a condition evaluating to UNKNOWN does not select the row. A
+ * provider that cannot represent the distinction between FALSE and UNKNOWN must decline any subtree
+ * whose condition can be UNKNOWN, which it can see from the operands' nullability.
  */
 @PublicEvolving
 public final class AccelFilter extends AccelNode {

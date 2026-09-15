@@ -25,8 +25,8 @@ import org.apache.flink.annotation.PublicEvolving;
  *
  * <p>Java 11 has no {@code sealed}, so the node hierarchy is closed with package-private
  * constructors instead: nothing outside this package can add a node kind. That stops an outside
- * implementor inventing a node, but it does not stop a provider built against an older IR meeting
- * a newer one at run time. This constant is how that mismatch is detected rather than discovered.
+ * implementor inventing a node, but it does not stop a provider built against an older IR meeting a
+ * newer one at run time. This constant is how that mismatch is detected rather than discovered.
  */
 @PublicEvolving
 public final class AccelIrVersion {

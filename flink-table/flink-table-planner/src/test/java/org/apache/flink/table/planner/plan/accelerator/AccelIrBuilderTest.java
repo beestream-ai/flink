@@ -43,7 +43,6 @@ import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -54,8 +53,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class AccelIrBuilderTest {
 
     private final FlinkTypeFactory types =
-            (FlinkTypeFactory) PlannerMocks.newBuilder().build().getPlannerContext()
-                    .getTypeFactory();
+            (FlinkTypeFactory)
+                    PlannerMocks.newBuilder().build().getPlannerContext().getTypeFactory();
     private final RexBuilder rex = new RexBuilder(types);
 
     private RelDataType t(SqlTypeName name, boolean nullable) {
@@ -114,8 +113,7 @@ class AccelIrBuilderTest {
     @Test
     @DisplayName("a built-in maps by identity; SQRT becomes the enum constant, not a string")
     void builtInMapsToEnum() {
-        RexNode sqrt =
-                rex.makeCall(SqlStdOperatorTable.SQRT, col(SqlTypeName.DOUBLE, 0, false));
+        RexNode sqrt = rex.makeCall(SqlStdOperatorTable.SQRT, col(SqlTypeName.DOUBLE, 0, false));
 
         AccelCall ir = (AccelCall) AccelIrBuilder.convert(sqrt).orElseThrow(AssertionError::new);
 
@@ -127,8 +125,7 @@ class AccelIrBuilderTest {
     void unmappedOperatorIsRefused() {
         // CHAR_LENGTH is a perfectly good SQL function with no accelerator representation.
         RexNode unsupported =
-                rex.makeCall(
-                        SqlStdOperatorTable.CHAR_LENGTH, col(SqlTypeName.VARCHAR, 0, false));
+                rex.makeCall(SqlStdOperatorTable.CHAR_LENGTH, col(SqlTypeName.VARCHAR, 0, false));
 
         assertThat(AccelIrBuilder.convert(unsupported)).isEmpty();
     }
@@ -139,10 +136,8 @@ class AccelIrBuilderTest {
         RexNode expr =
                 rex.makeCall(
                         SqlStdOperatorTable.PLUS,
-                        rex.makeCall(
-                                SqlStdOperatorTable.SQRT, col(SqlTypeName.DOUBLE, 0, false)),
-                        rex.makeCall(
-                                SqlStdOperatorTable.SQRT, col(SqlTypeName.DOUBLE, 1, false)));
+                        rex.makeCall(SqlStdOperatorTable.SQRT, col(SqlTypeName.DOUBLE, 0, false)),
+                        rex.makeCall(SqlStdOperatorTable.SQRT, col(SqlTypeName.DOUBLE, 1, false)));
 
         List<AccelExpression> converted =
                 Collections.singletonList(
@@ -162,12 +157,9 @@ class AccelIrBuilderTest {
     void serializes() throws Exception {
         RexNode expr =
                 rex.makeCall(
-                        SqlStdOperatorTable.MULTIPLY,
-                        col(SqlTypeName.DOUBLE, 1, true),
-                        lit(2.0));
+                        SqlStdOperatorTable.MULTIPLY, col(SqlTypeName.DOUBLE, 1, true), lit(2.0));
         AccelExpression ir = AccelIrBuilder.convert(expr).orElseThrow(AssertionError::new);
-        AccelWorkProfile work =
-                AccelIrBuilder.profile(Collections.singletonList(ir), 8, 8, 100L);
+        AccelWorkProfile work = AccelIrBuilder.profile(Collections.singletonList(ir), 8, 8, 100L);
 
         assertThat(roundTrip(ir)).isInstanceOf(AccelCall.class);
         assertThat(roundTrip(work)).isEqualTo(work);

@@ -119,7 +119,8 @@ public final class GpuAggregateSupport {
         // accumulate costs is the provider's business.
         int[] ops = new int[AccelFunction.values().length];
         ops[AccelFunction.PLUS.ordinal()] = sums * OPS_PER_SUM;
-        return RowCost.of(new AccelWorkProfile(ops, 8 * sums, 8 * sums, AccelWorkProfile.UNKNOWN_ROWS));
+        return RowCost.of(
+                new AccelWorkProfile(ops, 8 * sums, 8 * sums, AccelWorkProfile.UNKNOWN_ROWS));
     }
 
     /** The accumulator types a staged contraction can produce. */

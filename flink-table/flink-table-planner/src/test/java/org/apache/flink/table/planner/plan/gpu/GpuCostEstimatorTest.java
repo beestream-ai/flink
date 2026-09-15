@@ -230,7 +230,8 @@ class GpuCostEstimatorTest {
         RexNode expr =
                 rex.makeCall(SqlStdOperatorTable.MULTIPLY, col(SqlTypeName.DOUBLE, 0), lit(2.0));
 
-        assertTrue(GpuCostEstimator.estimate(expr).isEligible(), "NOT NULL is the fix, so it works");
+        assertTrue(
+                GpuCostEstimator.estimate(expr).isEligible(), "NOT NULL is the fix, so it works");
     }
 
     @Test

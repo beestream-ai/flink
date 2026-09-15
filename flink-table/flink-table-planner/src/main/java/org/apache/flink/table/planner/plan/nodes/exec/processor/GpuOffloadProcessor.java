@@ -97,8 +97,7 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
                 assign(
                         node,
                         new GpuOffloadAssignment(
-                                NO_GROUP,
-                                decision.forSubtree(Collections.singletonList(cost))));
+                                NO_GROUP, decision.forSubtree(Collections.singletonList(cost))));
                 continue;
             }
             costs.put(node, cost);
@@ -129,8 +128,7 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
             for (ExecNode<?> member : entry.getValue()) {
                 memberCosts.add(costs.get(member));
             }
-            GpuOffloadDecision.Verdict verdict =
-                    decision.forSubtree(memberCosts);
+            GpuOffloadDecision.Verdict verdict = decision.forSubtree(memberCosts);
             for (ExecNode<?> member : entry.getValue()) {
                 assign(member, new GpuOffloadAssignment(entry.getKey(), verdict));
             }

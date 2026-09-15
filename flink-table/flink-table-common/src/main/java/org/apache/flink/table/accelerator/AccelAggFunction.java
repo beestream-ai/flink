@@ -24,8 +24,8 @@ import org.apache.flink.annotation.PublicEvolving;
  * Aggregate functions an accelerator IR can express.
  *
  * <p>Two, in V1. Both have a contraction a linear-algebra library can serve directly, which is the
- * property that made them worth admitting first. MIN and MAX have no such entry point, and
- * DISTINCT and the order statistics need sorting or hashing.
+ * property that made them worth admitting first. MIN and MAX have no such entry point, and DISTINCT
+ * and the order statistics need sorting or hashing.
  */
 @PublicEvolving
 public enum AccelAggFunction {

@@ -35,8 +35,8 @@ import java.util.Objects;
  * Flink, which could not be right for every accelerator and could not be recalibrated without
  * changing Flink.
  *
- * <p>The two are one type because a single walk of the expression tree decides both. Splitting
- * them into separate visitors would let the eligibility rules and the counting drift apart.
+ * <p>The two are one type because a single walk of the expression tree decides both. Splitting them
+ * into separate visitors would let the eligibility rules and the counting drift apart.
  *
  * <p>Ineligible dominates: adding anything to an ineligible cost keeps the first rejection reason,
  * so the message names the expression that actually caused it rather than the last one visited.

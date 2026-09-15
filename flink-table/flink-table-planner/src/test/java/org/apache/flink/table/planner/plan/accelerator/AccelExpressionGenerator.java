@@ -23,9 +23,9 @@ import java.util.Random;
 /**
  * Generates random SQL expressions over the vocabulary the accelerator IR admits.
  *
- * <p>SQL text rather than {@code RexNode}s, so the expressions travel the whole path a user's
- * query does: parser, optimiser, IR conversion, execution. A generator that built RexNodes
- * directly would skip the two stages most likely to disagree.
+ * <p>SQL text rather than {@code RexNode}s, so the expressions travel the whole path a user's query
+ * does: parser, optimiser, IR conversion, execution. A generator that built RexNodes directly would
+ * skip the two stages most likely to disagree.
  *
  * <p>Seeded, because a differential failure is worthless if it cannot be reproduced.
  */

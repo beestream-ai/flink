@@ -28,8 +28,8 @@ import java.util.List;
  * One node of an accelerator IR plan subtree.
  *
  * <p>The unit handed to a provider is a <em>subtree</em>, never a single operator. That is what
- * lets a provider answer "I will serve this whole projection-and-sum with one library call"
- * as an ordinary answer rather than as a special case bolted on later.
+ * lets a provider answer "I will serve this whole projection-and-sum with one library call" as an
+ * ordinary answer rather than as a special case bolted on later.
  *
  * <p>The constructor is package-private, which is this module's stand-in for {@code sealed}:
  * nothing outside this package can add a node kind. Version skew between a provider and a newer
