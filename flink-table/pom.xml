@@ -43,7 +43,6 @@ under the License.
 		<module>flink-table-planner-loader</module>
 		<module>flink-table-planner-loader-bundle</module>
 		<module>flink-table-runtime</module>
-		<module>flink-table-gpu-runtime</module>
 		<module>flink-sql-gateway-api</module>
 		<module>flink-sql-gateway</module>
 		<module>flink-sql-client</module>

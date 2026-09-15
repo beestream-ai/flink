@@ -69,24 +69,6 @@ under the License.
 			<artifactId>flink-table-runtime</artifactId>
 			<version>${project.version}</version>
 		</dependency>
-		<!--
-			Provided scope, for two different reasons at once. GpuOffloadExample and
-			HaversineBenchmark never reference this module: they need it only so that
-			ServiceLoader finds the AcceleratorProvider, which is what putting the jar in a
-			distribution's lib/ does for a real deployment; without it the planner silently
-			falls back to CPU. FeatureGramBenchmark and ReferenceJoinBenchmark do reference it,
-			for FeatureGramEngine and ReferenceJoinEngine, because no planner path reaches an
-			aggregate or a join yet and those examples have to drive the device themselves.
-
-			Not compile scope: the jar belongs to the cluster, not to an example's jar, and it
-			drags TornadoVM behind it.
-		-->
-		<dependency>
-			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-table-gpu-runtime</artifactId>
-			<version>${project.version}</version>
-			<scope>provided</scope>
-		</dependency>
 
 		<dependency>
 			<groupId>org.apache.flink</groupId>
@@ -346,102 +328,6 @@ under the License.
 							<includes>
 								<include>org/apache/flink/table/examples/java/connectors/*</include>
 								<include>**/META-INF/services/*</include>
-								<include>META-INF/LICENSE</include>
-								<include>META-INF/NOTICE</include>
-							</includes>
-						</configuration>
-					</execution>
-
-					<execution>
-						<id>HaversineBenchmark</id>
-						<phase>package</phase>
-						<goals>
-							<goal>jar</goal>
-						</goals>
-
-						<configuration>
-							<classifier>HaversineBenchmark</classifier>
-
-							<archive>
-								<manifestEntries>
-									<program-class>org.apache.flink.table.examples.java.gpu.HaversineBenchmark</program-class>
-								</manifestEntries>
-							</archive>
-
-							<includes>
-								<include>org/apache/flink/table/examples/java/gpu/HaversineBenchmark*</include>
-								<include>META-INF/LICENSE</include>
-								<include>META-INF/NOTICE</include>
-							</includes>
-						</configuration>
-					</execution>
-
-					<execution>
-						<id>LogisticRegressionBenchmark</id>
-						<phase>package</phase>
-						<goals>
-							<goal>jar</goal>
-						</goals>
-
-						<configuration>
-							<classifier>LogisticRegressionBenchmark</classifier>
-
-							<archive>
-								<manifestEntries>
-									<program-class>org.apache.flink.table.examples.java.gpu.LogisticRegressionBenchmark</program-class>
-								</manifestEntries>
-							</archive>
-
-							<includes>
-								<include>org/apache/flink/table/examples/java/gpu/LogisticRegressionBenchmark*</include>
-								<include>META-INF/LICENSE</include>
-								<include>META-INF/NOTICE</include>
-							</includes>
-						</configuration>
-					</execution>
-
-					<execution>
-						<id>MixedTypeVerification</id>
-						<phase>package</phase>
-						<goals>
-							<goal>jar</goal>
-						</goals>
-
-						<configuration>
-							<classifier>MixedTypeVerification</classifier>
-
-							<archive>
-								<manifestEntries>
-									<program-class>org.apache.flink.table.examples.java.gpu.MixedTypeVerification</program-class>
-								</manifestEntries>
-							</archive>
-
-							<includes>
-								<include>org/apache/flink/table/examples/java/gpu/MixedTypeVerification*</include>
-								<include>META-INF/LICENSE</include>
-								<include>META-INF/NOTICE</include>
-							</includes>
-						</configuration>
-					</execution>
-
-					<execution>
-						<id>FeatureGramBenchmark</id>
-						<phase>package</phase>
-						<goals>
-							<goal>jar</goal>
-						</goals>
-
-						<configuration>
-							<classifier>FeatureGramBenchmark</classifier>
-
-							<archive>
-								<manifestEntries>
-									<program-class>org.apache.flink.table.examples.java.gpu.FeatureGramBenchmark</program-class>
-								</manifestEntries>
-							</archive>
-
-							<includes>
-								<include>org/apache/flink/table/examples/java/gpu/FeatureGramBenchmark*</include>
 								<include>META-INF/LICENSE</include>
 								<include>META-INF/NOTICE</include>
 							</includes>

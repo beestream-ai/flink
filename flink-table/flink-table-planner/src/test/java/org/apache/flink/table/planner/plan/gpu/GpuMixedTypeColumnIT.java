@@ -112,7 +112,7 @@ class GpuMixedTypeColumnIT {
      * would need in order to accept it.
      *
      * <p>The refusal itself is still asserted, in the module that owns it: see {@code
-     * GpuCalcSpecStagingTest} in {@code flink-table-gpu-runtime}.
+     * GpuCalcSpecStagingTest} in the provider's own repository.
      */
     @Test
     @DisplayName("a BOOLEAN column is eligible; staging it is the provider's problem")
