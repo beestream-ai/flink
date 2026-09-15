@@ -50,6 +50,11 @@ class AcceleratorPathIT {
     private static final String QUERY =
             "SELECT id, EXP(val) * LN(val) + SIN(val) * COS(val) AS h FROM t WHERE val > 10.0";
 
+    /** The same shape, but the column carried past the kernel is nullable and always null. */
+    private static final String NULLABLE_QUERY =
+            "SELECT tag, EXP(val) * LN(val) + SIN(val) * COS(val) AS h "
+                    + "FROM t_nullable WHERE val > 10.0";
+
     private TableEnvironment tEnv;
 
     @BeforeEach
@@ -62,6 +67,21 @@ class AcceleratorPathIT {
                         + "'connector' = 'datagen', 'number-of-rows' = '50',"
                         + "'fields.id.kind' = 'sequence',"
                         + "'fields.id.start' = '1', 'fields.id.end' = '50',"
+                        + "'fields.val.kind' = 'sequence',"
+                        + "'fields.val.start' = '1', 'fields.val.end' = '50')");
+        tEnv.executeSql(
+                // The same, with a nullable pass-through column that is null in every row.
+                //
+                // null-rate 1.0 rather than something in between, because the comparison below is
+                // between two separate jobs over a regenerated source: at any other rate the nulls
+                // land in different places each run and the two result sets differ for a reason
+                // that has nothing to do with offload. At 1.0 the column is deterministic.
+                "CREATE TABLE t_nullable ("
+                        + "id BIGINT NOT NULL, tag BIGINT, val DOUBLE NOT NULL) WITH ("
+                        + "'connector' = 'datagen', 'number-of-rows' = '50',"
+                        + "'fields.id.kind' = 'sequence',"
+                        + "'fields.id.start' = '1', 'fields.id.end' = '50',"
+                        + "'fields.tag.null-rate' = '1.0',"
                         + "'fields.val.kind' = 'sequence',"
                         + "'fields.val.start' = '1', 'fields.val.end' = '50')");
     }
@@ -111,6 +131,59 @@ class AcceleratorPathIT {
         List<Row> onCpu = run(QUERY);
 
         assertThat(seen).isPositive();
+        assertThat(TestAcceleratorProvider.ROWS_PROCESSED.get())
+                .as("the second run must not have touched the provider")
+                .isEqualTo(seen);
+        assertThat(accelerated).containsExactlyInAnyOrderElementsOf(onCpu);
+    }
+
+    /**
+     * A null in a pass-through column stays a null.
+     *
+     * <p>Pass-through columns never reach a device: they are staged host-side and re-emitted, which
+     * is both cheaper and the only way to carry a type a kernel cannot represent. That staging is
+     * where a null goes missing, because the natural way to write it is a primitive array, and a
+     * {@code long[]} has no null — it has a zero. Nothing about the query says so, and the result
+     * is a row that silently reads 0 where the CPU plan says NULL.
+     *
+     * <p>Distinct from M2.2, which refuses nullable operands of a <em>call</em>. That refusal is
+     * correct and stays: a kernel has no null to compute with. A column merely carried past the
+     * kernel needs no null semantics at all, only somewhere to record that it was one.
+     */
+    @Test
+    @DisplayName("a null in a pass-through column survives the accelerator as a null, not a zero")
+    void nullPassThroughSurvives() {
+        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        TestAcceleratorProvider.enable(4.0);
+
+        List<Row> accelerated = run(NULLABLE_QUERY);
+
+        assertThat(TestAcceleratorProvider.ROWS_PROCESSED.get())
+                .as("the accelerator must have run, or this asserts nothing")
+                .isPositive();
+        assertThat(accelerated).isNotEmpty();
+        assertThat(accelerated)
+                .allSatisfy(
+                        row ->
+                                assertThat(row.getField(0))
+                                        .as("pass-through column must be null, not 0")
+                                        .isNull());
+    }
+
+    @Test
+    @DisplayName("and the CPU produces exactly the same rows for the same query")
+    void nullPassThroughMatchesTheCpuPath() {
+        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        TestAcceleratorProvider.enable(4.0);
+        List<Row> accelerated = run(NULLABLE_QUERY);
+        int seen = TestAcceleratorProvider.ROWS_PROCESSED.get();
+
+        TestAcceleratorProvider.reset();
+        List<Row> onCpu = run(NULLABLE_QUERY);
+
+        assertThat(seen).isPositive();
+        // reset() disables the provider but deliberately leaves the counters alone, so "the
+        // second run went around it" reads as "the count did not move".
         assertThat(TestAcceleratorProvider.ROWS_PROCESSED.get())
                 .as("the second run must not have touched the provider")
                 .isEqualTo(seen);
