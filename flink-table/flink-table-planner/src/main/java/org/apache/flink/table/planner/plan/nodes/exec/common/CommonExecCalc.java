@@ -27,6 +27,8 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.planner.codegen.CalcCodeGenerator;
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
 import org.apache.flink.table.planner.delegation.PlannerBase;
+import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
 import org.apache.flink.table.planner.plan.gpu.GpuKernelGenerator;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
@@ -268,13 +270,22 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
             recordGpuFallback(assignment, "expressions cannot be generated as a device kernel");
             return codeGenerated;
         }
+        RowType inputType = (RowType) getInputEdges().get(0).getOutputType();
+        Optional<AccelNode> subtree =
+                AccelIrBuilder.buildCalc(projection, condition, inputType, outputType);
+        if (!subtree.isPresent()) {
+            recordGpuFallback(assignment, "expressions have no accelerator IR representation");
+            return codeGenerated;
+        }
         GpuCalcSpec spec =
                 new GpuCalcSpec(
                         kernel.get(),
                         kernel.get().outputLayout(),
                         outputType,
                         planner.getTableConfig().get(GpuOffloadOptions.BATCH_SIZE),
-                        assignment.verdict().work());
+                        assignment.verdict().work(),
+                        subtree.get(),
+                        planner.getTableConfig().get(GpuOffloadOptions.MIN_SPEEDUP));
         if (!spec.canStage()) {
             recordGpuFallback(assignment, "output row cannot be staged for a device");
             return codeGenerated;

@@ -1,0 +1,3 @@
+# Registered for tests only. Declines every subtree unless a test calls
+# TestAcceleratorProvider.enable(...), so its mere presence reroutes nothing.
+org.apache.flink.table.planner.plan.accelerator.TestAcceleratorProvider

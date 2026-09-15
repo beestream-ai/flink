@@ -20,6 +20,7 @@ package org.apache.flink.table.runtime.gpu;
 
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
+import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -50,18 +51,24 @@ public final class GpuCalcSpec implements Serializable {
     private final RowType outputType;
     private final int batchSize;
     private final AccelWorkProfile work;
+    private final AccelNode subtree;
+    private final double minSpeedup;
 
     public GpuCalcSpec(
             GpuKernelSource kernel,
             int[] outputLayout,
             RowType outputType,
             int batchSize,
-            AccelWorkProfile work) {
+            AccelWorkProfile work,
+            AccelNode subtree,
+            double minSpeedup) {
         this.kernel = kernel;
         this.outputLayout = outputLayout;
         this.outputType = outputType;
         this.batchSize = batchSize;
         this.work = work;
+        this.subtree = subtree;
+        this.minSpeedup = minSpeedup;
     }
 
     public GpuKernelSource kernel() {
@@ -100,6 +107,21 @@ public final class GpuCalcSpec implements Serializable {
      */
     public AccelWorkProfile work() {
         return work;
+    }
+
+    /** What to run, in accelerator IR. Handed to a provider on the TaskManager. */
+    public AccelNode subtree() {
+        return subtree;
+    }
+
+    /**
+     * How much faster than the CPU a provider must claim to be before Flink prefers it.
+     *
+     * <p>Policy, not calibration: it means the same thing on every accelerator. Read from config
+     * on the client and shipped, so the TaskManager needs no access to the job's table config.
+     */
+    public double minSpeedup() {
+        return minSpeedup;
     }
 
     /**

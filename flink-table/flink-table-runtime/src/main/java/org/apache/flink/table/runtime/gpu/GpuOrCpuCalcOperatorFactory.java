@@ -28,6 +28,11 @@ import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeServiceAware;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.runtime.accelerator.AcceleratorChoice;
+import org.apache.flink.table.runtime.accelerator.AcceleratorContext;
+import org.apache.flink.table.runtime.accelerator.AcceleratorProvider;
+import org.apache.flink.table.runtime.accelerator.AcceleratorProviders;
+import org.apache.flink.table.types.logical.RowType;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -102,13 +107,43 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
     public <T extends StreamOperator<RowData>> T createStreamOperator(
             StreamOperatorParameters<RowData> parameters) {
         try {
+            ClassLoader loader = parameters.getContainingTask().getUserCodeClassLoader();
+
+            // The accelerator SPI first. It is the one that asks a provider what its device would
+            // charge, rather than merely whether it exists.
+            Optional<AcceleratorProvider> accelerator = AcceleratorProviders.find(loader);
+            if (accelerator.isPresent()) {
+                AcceleratorChoice.Outcome outcome =
+                        AcceleratorChoice.choose(
+                                accelerator.get(),
+                                spec.subtree(),
+                                spec.work(),
+                                spec.minSpeedup(),
+                                spec.work().estimatedRows());
+                if (outcome.accelerated()) {
+                    StreamOperatorFactory<RowData> built =
+                            accelerator
+                                    .get()
+                                    .createOperator(
+                                            outcome.plan().get(), contextFor(spec, loader));
+                    built.setChainingStrategy(getChainingStrategy());
+                    if (built instanceof ProcessingTimeServiceAware) {
+                        ((ProcessingTimeServiceAware) built)
+                                .setProcessingTimeService(processingTimeService);
+                    }
+                    T operator = built.createStreamOperator(parameters);
+                    LOG.info("Accelerated on this TaskManager: {}", outcome.reason());
+                    return operator;
+                }
+                return codeGenerated(parameters, outcome.reason());
+            }
+
+            // The pre-SPI path, still here until the provider moves out of tree (task M1.1).
             Optional<GpuOperatorFactoryProvider> provider =
-                    GpuOperatorFactoryProvider.find(
-                            parameters.getContainingTask().getUserCodeClassLoader());
+                    GpuOperatorFactoryProvider.find(loader);
             if (!provider.isPresent()) {
                 return codeGenerated(
-                        parameters,
-                        "no GpuOperatorFactoryProvider on this TaskManager's classpath");
+                        parameters, "no accelerator provider on this TaskManager's classpath");
             }
             Optional<StreamOperatorFactory<RowData>> factory =
                     provider.get().createCalcOperatorFactory(spec);
@@ -127,8 +162,27 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
                     provider.get().describe());
             return operator;
         } catch (Throwable t) {
-            return codeGenerated(parameters, "GPU operator could not be created (" + t + ")");
+            return codeGenerated(parameters, "accelerator operator could not be created (" + t + ")");
         }
+    }
+
+    private static AcceleratorContext contextFor(GpuCalcSpec spec, ClassLoader loader) {
+        return new AcceleratorContext() {
+            @Override
+            public RowType outputType() {
+                return spec.outputType();
+            }
+
+            @Override
+            public int maxBatchSize() {
+                return spec.batchSize();
+            }
+
+            @Override
+            public ClassLoader userCodeClassLoader() {
+                return loader;
+            }
+        };
     }
 
     private <T extends StreamOperator<RowData>> T codeGenerated(

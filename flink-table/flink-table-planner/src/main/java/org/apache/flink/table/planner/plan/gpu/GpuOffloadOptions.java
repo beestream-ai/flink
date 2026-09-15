@@ -176,6 +176,28 @@ public class GpuOffloadOptions {
 
 
 
+    /**
+     * How much faster than the CPU a provider must claim to be before Flink prefers it.
+     *
+     * <p>A <em>policy</em> constant, and the distinction matters: it says how much margin Flink
+     * wants before taking an unfamiliar execution path, and it means the same thing on a GPU, an
+     * FPGA and whatever comes next. The floors it replaced -- 96 weighted operations per row, ten
+     * million in total -- were measurements of one RTX 4070 and meant nothing on any other device.
+     *
+     * <p>1.3 rather than 1.0 because the paths are not otherwise equal: the accelerated one defers
+     * output by a batch, allocates staging buffers, and is the less familiar of the two. A claimed
+     * 5% win is not worth those.
+     */
+    public static final ConfigOption<Double> MIN_SPEEDUP =
+            ConfigOptions.key("table.exec.gpu-offload.min-speedup")
+                    .doubleType()
+                    .defaultValue(1.3)
+                    .withDescription(
+                            "How much faster than the CPU a provider must claim to be before its "
+                                    + "plan is preferred. Compared against the provider's own "
+                                    + "estimate for its own device, made on the TaskManager. Not "
+                                    + "a hardware constant: it means the same on any accelerator.");
+
     public static final ConfigOption<Integer> BATCH_SIZE =
             ConfigOptions.key("table.exec.gpu-offload.batch-size")
                     .intType()

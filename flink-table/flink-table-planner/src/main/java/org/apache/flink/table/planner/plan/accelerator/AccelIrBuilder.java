@@ -23,11 +23,16 @@ import org.apache.flink.table.accelerator.AccelExpression;
 import org.apache.flink.table.accelerator.AccelFunction;
 import org.apache.flink.table.accelerator.AccelInputRef;
 import org.apache.flink.table.accelerator.AccelLiteral;
+import org.apache.flink.table.accelerator.AccelFilter;
+import org.apache.flink.table.accelerator.AccelInput;
+import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.accelerator.AccelProject;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.functions.BuiltInFunctionDefinition;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.RowType;
 
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
@@ -143,6 +148,40 @@ public final class AccelIrBuilder {
             operands.add(converted.get());
         }
         return logicalType(call).map(type -> new AccelCall(function, operands, type));
+    }
+
+    /**
+     * Builds the subtree for one Calc: a projection, optionally over a filter, over the input.
+     *
+     * <p>This is what a provider is handed. It is a subtree rather than a bare expression list
+     * because a provider must be able to recognise shapes spanning operators — and because the
+     * filter's position relative to the projection is information it needs.
+     *
+     * @return empty when any expression has no representation, which is an ordinary outcome
+     */
+    public static Optional<AccelNode> buildCalc(
+            List<RexNode> projection,
+            @Nullable RexNode condition,
+            RowType inputType,
+            RowType outputType) {
+
+        AccelNode input = new AccelInput(inputType);
+        if (condition != null) {
+            Optional<AccelExpression> filter = convert(condition);
+            if (!filter.isPresent()) {
+                return Optional.empty();
+            }
+            input = new AccelFilter(filter.get(), input, inputType);
+        }
+        List<AccelExpression> projections = new ArrayList<>(projection.size());
+        for (RexNode expression : projection) {
+            Optional<AccelExpression> converted = convert(expression);
+            if (!converted.isPresent()) {
+                return Optional.empty();
+            }
+            projections.add(converted.get());
+        }
+        return Optional.of(new AccelProject(projections, input, outputType));
     }
 
     /**
