@@ -55,6 +55,20 @@ class AcceleratorPathIT {
             "SELECT tag, EXP(val) * LN(val) + SIN(val) * COS(val) AS h "
                     + "FROM t_nullable WHERE val > 10.0";
 
+    /**
+     * A FLOAT expression chosen so float and double arithmetic disagree in the first figure, not
+     * the fourth.
+     *
+     * <p>{@code (f + 1e7) - 1e7} is catastrophic cancellation: a float carries 24 bits, so adding
+     * 1e7 to a small value discards it entirely and subtracting 1e7 back returns a coarse multiple
+     * of the exponent step. In double the same expression returns the value. If the device were
+     * ever to compute this in double and narrow at the end, the disagreement would be impossible to
+     * miss — which is the point of choosing it.
+     */
+    private static final String FLOAT_QUERY =
+            "SELECT id, (fval + CAST(10000000.0 AS FLOAT)) - CAST(10000000.0 AS FLOAT) AS h "
+                    + "FROM t_float";
+
     private TableEnvironment tEnv;
 
     @BeforeEach
@@ -84,6 +98,13 @@ class AcceleratorPathIT {
                         + "'fields.tag.null-rate' = '1.0',"
                         + "'fields.val.kind' = 'sequence',"
                         + "'fields.val.start' = '1', 'fields.val.end' = '50')");
+        tEnv.executeSql(
+                "CREATE TABLE t_float (id BIGINT NOT NULL, fval FLOAT NOT NULL) WITH ("
+                        + "'connector' = 'datagen', 'number-of-rows' = '50',"
+                        + "'fields.id.kind' = 'sequence',"
+                        + "'fields.id.start' = '1', 'fields.id.end' = '50',"
+                        + "'fields.fval.kind' = 'sequence',"
+                        + "'fields.fval.start' = '1', 'fields.fval.end' = '50')");
     }
 
     @AfterEach
@@ -188,6 +209,33 @@ class AcceleratorPathIT {
                 .as("the second run must not have touched the provider")
                 .isEqualTo(seen);
         assertThat(accelerated).containsExactlyInAnyOrderElementsOf(onCpu);
+    }
+
+    /**
+     * A FLOAT expression runs on the CPU, and the accelerator is never even asked to try.
+     *
+     * <p>M2.3 offers two ways to be correct here — generate float arithmetic throughout, or refuse
+     * — and this project refuses. Flink rounds float arithmetic at every step; a kernel computing
+     * the chain in double and narrowing once rounds once, and for a cancelling expression like this
+     * one the two answers are not close. The refusal is in the estimator, so the provider is not
+     * offered the subtree at all.
+     */
+    @Test
+    @DisplayName("a FLOAT expression is left on the CPU rather than offloaded")
+    void floatExpressionStaysOnTheCpu() {
+        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        TestAcceleratorProvider.enable(10.0);
+
+        List<Row> accelerated = run(FLOAT_QUERY);
+
+        assertThat(TestAcceleratorProvider.ROWS_PROCESSED.get())
+                .as("a FLOAT expression must not reach the accelerator")
+                .isZero();
+
+        TestAcceleratorProvider.reset();
+        assertThat(accelerated)
+                .as("and the rows are the CPU's, because the CPU is what ran")
+                .containsExactlyInAnyOrderElementsOf(run(FLOAT_QUERY));
     }
 
     @Test

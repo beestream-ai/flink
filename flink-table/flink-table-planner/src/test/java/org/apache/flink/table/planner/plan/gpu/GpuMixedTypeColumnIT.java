@@ -142,27 +142,60 @@ class GpuMixedTypeColumnIT {
     }
 
     /**
-     * The staging path can now write a {@code FLOAT} result, and nothing reaches it.
+     * A {@code FLOAT} result is refused, and since M2.3 for the reason that actually matters.
      *
-     * <p>Two independent things stand in the way, and only one of them was the buffer. The cost
-     * estimator refuses a narrowing cast outright, and a {@code FLOAT} result arises otherwise only
-     * from {@code FLOAT}-only arithmetic, which is a weight of one per operator and does not clear
-     * a floor of 96 in any expression anyone would write.
+     * <p>It used to be refused as a narrowing cast, which was true of this query and missed the
+     * general case: {@code FLOAT}-only arithmetic produces a {@code FLOAT} with no cast anywhere
+     * and was eligible. The rule is now on the result type, so both shapes are covered — see {@link
+     * #floatArithmeticIsRefusedWithoutAnyCast()}.
      *
-     * <p>Asserted as a refusal rather than deleted, so that relaxing the cast rule is a deliberate
-     * act: what {@code CAST(&hellip; AS FLOAT)} should do when the value overflows a float is a
-     * semantic question this change did not answer.
+     * <p>Asserted as a refusal rather than deleted, so that relaxing it is a deliberate act.
      */
     @Test
-    @DisplayName("a FLOAT result is still refused, by the estimator rather than by staging")
+    @DisplayName("a FLOAT result is refused, and the reason is the arithmetic, not the cast")
     void floatResultIsRefusedByTheEstimator() {
         String plan =
                 tEnv.explainSql(
                         "SELECT id, CAST(EXP(d) * LN(d) + SIN(d) * COS(d) + POWER(d, 3.0) AS FLOAT)"
                                 + " AS h FROM mixed");
         assertTrue(
-                plan.contains("unsupported cast to FLOAT"),
+                plan.contains("FLOAT result"),
                 "expected the estimator to give the reason:\n" + plan);
+    }
+
+    /**
+     * The case the cast rule never saw: {@code FLOAT} arithmetic, no cast in sight.
+     *
+     * <p>Flink evaluates this in float and rounds at every step; a kernel computing in double and
+     * narrowing once rounds once. A single operation agrees either way — double carries more than
+     * the 2p+2 bits that makes one rounding exact — so it is chains that diverge, and a chain is
+     * what any expression worth offloading is.
+     */
+    @Test
+    @DisplayName("FLOAT arithmetic is refused even with no cast anywhere in the expression")
+    void floatArithmeticIsRefusedWithoutAnyCast() {
+        String plan = tEnv.explainSql("SELECT id, f * f + f AS h FROM mixed");
+        assertTrue(
+                plan.contains("FLOAT result"),
+                "expected a refusal naming the FLOAT result:\n" + plan);
+    }
+
+    /**
+     * A {@code FLOAT} <em>input</em> to a {@code DOUBLE} expression stays eligible.
+     *
+     * <p>Pinned, because the obvious way to write the refusal above is on the operand types and
+     * that would take this with it for no reason. Widening a float to a double is exact, and the
+     * arithmetic that follows is Flink's double arithmetic on both processors.
+     */
+    @Test
+    @DisplayName("a FLOAT input feeding DOUBLE arithmetic is still eligible")
+    void floatInputToDoubleArithmeticStaysEligible() {
+        String plan =
+                tEnv.explainSql(
+                        "SELECT id, EXP(CAST(f AS DOUBLE)) * LN(d) + SIN(d) * COS(d) AS h"
+                                + " FROM mixed");
+        String section = plan.substring(plan.indexOf("== GPU Offload =="));
+        assertTrue(section.contains("GPU"), "expected eligibility:\n" + section);
     }
 
     /**
