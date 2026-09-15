@@ -43,7 +43,7 @@ class GpuOffloadExplainIT {
     void setUp() {
         tEnv = TableEnvironment.create(EnvironmentSettings.newInstance().inBatchMode().build());
         tEnv.executeSql(
-                "CREATE TABLE t (id BIGINT, val DOUBLE) WITH ("
+                "CREATE TABLE t (id BIGINT NOT NULL, val DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '10')");
     }
 
@@ -109,5 +109,28 @@ class GpuOffloadExplainIT {
         String plan = tEnv.explainSql("SELECT word, n + 1 AS m FROM s WHERE n > 0");
 
         assertTrue(plan.contains("not expressible on device"), plan);
+    }
+
+    @Test
+    @DisplayName("a nullable column is refused, and EXPLAIN names NOT NULL as the fix")
+    void nullableColumnIsExplainedAndNotNullFixesIt() {
+        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        // Same heavy expression, same shape, same row count -- the only difference is the DDL.
+        tEnv.executeSql(
+                "CREATE TABLE nullable_t (id BIGINT, val DOUBLE) WITH ("
+                        + "'connector' = 'datagen', 'number-of-rows' = '10')");
+        String nullableSql = HEAVY.replace("FROM t", "FROM nullable_t");
+
+        String refused = tEnv.explainSql(nullableSql);
+        assertTrue(refused.contains("== GPU Offload =="), refused);
+        assertTrue(refused.contains("CPU"), refused);
+        assertTrue(
+                refused.contains("NOT NULL"),
+                "EXPLAIN must name the fix, not merely refuse:\n" + refused);
+
+        // t declares NOT NULL, so the identical expression is selected.
+        String accepted = tEnv.explainSql(HEAVY);
+        assertTrue(accepted.contains("GPU  subtree 0"), accepted);
+        assertFalse(accepted.contains("NOT NULL"), accepted);
     }
 }

@@ -56,6 +56,11 @@ class GpuCostEstimatorTest {
         return rex.makeLiteral(BigDecimal.valueOf(value), t(SqlTypeName.DOUBLE));
     }
 
+    /** Calcite's {@code createSqlType} is NOT NULL by default; this is the other case. */
+    private RexNode nullableCol(SqlTypeName name, int index) {
+        return rex.makeInputRef(types.createTypeWithNullability(t(name), true), index);
+    }
+
     @Test
     @DisplayName("a BIGINT operand is refused, matching what the generator will accept")
     void bigintOperandIsRefused() {
@@ -201,5 +206,39 @@ class GpuCostEstimatorTest {
 
         assertEquals(8, one.weight());
         assertEquals(24, three.weight());
+    }
+
+    @Test
+    @DisplayName("a nullable expression input is refused, and the reason names NOT NULL")
+    void nullableInputIsRefused() {
+        // A staged column crosses as a bare primitive. BinaryRowData.setNullAt zeroes the slot, so
+        // a null would arrive at the kernel as 0.0 -- which looks like data and is computed on.
+        RexNode expr =
+                rex.makeCall(
+                        SqlStdOperatorTable.MULTIPLY, nullableCol(SqlTypeName.DOUBLE, 0), lit(2.0));
+
+        RowCost cost = GpuCostEstimator.estimate(expr);
+
+        assertFalse(cost.isEligible(), "a nullable operand has no device representation");
+        assertTrue(cost.rejection().contains("NOT NULL"), cost::rejection);
+    }
+
+    @Test
+    @DisplayName("the same expression over a NOT NULL column is still eligible")
+    void nonNullableInputIsAccepted() {
+        RexNode expr =
+                rex.makeCall(SqlStdOperatorTable.MULTIPLY, col(SqlTypeName.DOUBLE, 0), lit(2.0));
+
+        assertTrue(GpuCostEstimator.estimate(expr).isEligible(), "NOT NULL is the fix, so it works");
+    }
+
+    @Test
+    @DisplayName("a nullable column projected through is still fine: it never reaches the device")
+    void nullablePassThroughIsAllowed() {
+        // Only expression *inputs* are refused. A projected-through column is staged host-side,
+        // so its nullability is a matter for the pass-through buffer (task 0.1a), not the kernel.
+        RowCost cost = GpuCostEstimator.estimate(nullableCol(SqlTypeName.BIGINT, 0));
+
+        assertTrue(cost.isEligible(), "a pass-through column never crosses to the device");
     }
 }

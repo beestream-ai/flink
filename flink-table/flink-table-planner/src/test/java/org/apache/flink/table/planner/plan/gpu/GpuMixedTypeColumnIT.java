@@ -47,7 +47,7 @@ class GpuMixedTypeColumnIT {
     void setUp() {
         tEnv = TableEnvironment.create(EnvironmentSettings.newInstance().inBatchMode().build());
         tEnv.executeSql(
-                "CREATE TABLE mixed (id BIGINT, i INT, f FLOAT, d DOUBLE, b BOOLEAN) WITH ("
+                "CREATE TABLE mixed (id BIGINT NOT NULL, i INT NOT NULL, f FLOAT NOT NULL, d DOUBLE NOT NULL, b BOOLEAN NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '2000000')");
         tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
     }

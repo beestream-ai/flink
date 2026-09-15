@@ -47,7 +47,7 @@ class GpuAggregateFusionIT {
     void setUp() {
         tEnv = TableEnvironment.create(EnvironmentSettings.newInstance().inBatchMode().build());
         tEnv.executeSql(
-                "CREATE TABLE t (id BIGINT, k INT, val DOUBLE) WITH ("
+                "CREATE TABLE t (id BIGINT NOT NULL, k INT NOT NULL, val DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '2000000')");
         tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
     }

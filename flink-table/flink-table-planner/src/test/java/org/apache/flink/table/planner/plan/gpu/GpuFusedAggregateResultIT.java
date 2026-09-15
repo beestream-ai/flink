@@ -68,7 +68,7 @@ class GpuFusedAggregateResultIT {
         TableEnvironment tEnv =
                 TableEnvironment.create(EnvironmentSettings.newInstance().inBatchMode().build());
         tEnv.executeSql(
-                "CREATE TABLE seq (id INT) WITH ("
+                "CREATE TABLE seq (id INT NOT NULL) WITH ("
                         + "'connector' = 'datagen',"
                         + " 'number-of-rows' = '20000',"
                         + " 'fields.id.kind' = 'sequence',"

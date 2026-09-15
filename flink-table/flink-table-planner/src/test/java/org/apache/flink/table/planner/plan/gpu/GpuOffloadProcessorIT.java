@@ -60,7 +60,7 @@ class GpuOffloadProcessorIT {
     void setUp() {
         tEnv = TableEnvironment.create(EnvironmentSettings.newInstance().inBatchMode().build());
         tEnv.executeSql(
-                "CREATE TABLE t (id BIGINT, val DOUBLE) WITH ("
+                "CREATE TABLE t (id BIGINT NOT NULL, val DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '10')");
         planner = (PlannerBase) ((TableEnvironmentImpl) tEnv).getPlanner();
     }

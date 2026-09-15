@@ -50,7 +50,7 @@ class GpuSubstitutionIT {
         TableEnvironment tEnv =
                 TableEnvironment.create(EnvironmentSettings.newInstance().inBatchMode().build());
         tEnv.executeSql(
-                "CREATE TABLE t (id BIGINT, val DOUBLE) WITH ("
+                "CREATE TABLE t (id BIGINT NOT NULL, val DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '200')");
         tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
         // Floors of 1 so even a trivial expression is selected, isolating the fallback from the

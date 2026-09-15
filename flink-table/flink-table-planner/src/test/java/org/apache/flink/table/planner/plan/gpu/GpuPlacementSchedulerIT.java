@@ -71,7 +71,7 @@ class GpuPlacementSchedulerIT {
         env.setParallelism(1);
         StreamTableEnvironment t = StreamTableEnvironment.create(env);
         t.executeSql(
-                "CREATE TABLE t (id BIGINT, val DOUBLE) WITH ("
+                "CREATE TABLE t (id BIGINT NOT NULL, val DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '1000')");
         t.getConfig().set(GpuOffloadOptions.ENABLED, true);
         t.getConfig().set(GpuOffloadOptions.REQUIRE_DEVICE, true);

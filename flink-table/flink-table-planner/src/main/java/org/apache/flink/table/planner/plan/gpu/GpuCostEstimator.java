@@ -119,6 +119,10 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
 
     @Override
     public RowCost visitInputRef(RexInputRef ref) {
+        // Nullability is deliberately NOT checked here. A bare top-level RexInputRef is a
+        // projected-through column: it is staged host-side and never crosses to the device, so its
+        // nullability is the pass-through buffer's business (task 0.1a), not the kernel's.
+        // Nullable *expression inputs* are refused in visitCall, where the operand walk is.
         return isSupportedType(ref.getType())
                 ? RowCost.of(OperatorWeights.LEAF)
                 : RowCost.ineligible("unsupported column type " + ref.getType());
@@ -168,6 +172,23 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
             // CPU plan for large keys. Projecting such a column through is still fine: it never
             // reaches the device. Costing it here as eligible and having generation refuse it
             // later showed up in EXPLAIN as an unexplained fallback.
+            // A staged column crosses to the device as a bare primitive. There is no null
+            // representation in the buffer and no three-valued logic in the generated kernel, so a
+            // null would arrive as 0.0 -- which looks like data -- and be computed on.
+            //
+            // What the refusal costs is more than it sounds: Calcite does not narrow nullability
+            // through a filter, so `SELECT f(x) FROM t WHERE x IS NOT NULL` still types x as
+            // nullable and is refused even though a null is impossible there. Conservative is the
+            // safe direction, and the reason names the fix rather than leaving the user guessing.
+            if (operand.getType().isNullable()) {
+                return RowCost.ineligible(
+                        "nullable operand of "
+                                + call.getOperator().getName()
+                                + " (type "
+                                + operand.getType()
+                                + "): a device kernel has no null representation, so declare the "
+                                + "column NOT NULL to make this expression offloadable");
+            }
             if (operand.getType().getSqlTypeName() == SqlTypeName.BIGINT) {
                 return RowCost.ineligible(
                         "BIGINT operand of "
