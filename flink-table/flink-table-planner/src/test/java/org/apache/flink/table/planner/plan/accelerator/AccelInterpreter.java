@@ -146,12 +146,11 @@ final class AccelInterpreter {
             case SIGN:
                 return Math.signum(a);
             case LEAST:
-                // Not Math.min: that propagates NaN, and Flink's LEAST does not. LEAST(NaN, e)
-                // is e on the CPU path, because the comparison is false and the other operand
-                // wins. Matching Flink is the point -- Flink is the reference implementation.
-                return a <= b ? a : b;
+                // Double.compare, not Math.min. Flink folds these with Double.compareTo, whose
+                // total order puts NaN above everything -- so NaN loses LEAST and wins GREATEST.
+                return Double.compare(a, b) <= 0 ? a : b;
             case GREATEST:
-                return a >= b ? a : b;
+                return Double.compare(a, b) >= 0 ? a : b;
             case CAST:
                 return a;
             case EQUALS:

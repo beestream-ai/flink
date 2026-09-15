@@ -423,10 +423,26 @@ public final class GpuKernelGenerator {
             if (operands.size() < 2 || !isDoubleResult(call)) {
                 return null;
             }
-            String reduce = "LEAST".equals(name) ? "min" : "max";
+            // NOT TornadoMath.min/max. Those propagate NaN the way Math.min does, and Flink does
+            // not: ScalarOperatorGens.generateGreatestLeast folds with Double.compareTo, whose
+            // total order places NaN above every other value. So NaN wins GREATEST and loses
+            // LEAST, and a kernel using min/max returns a different answer from the CPU plan for
+            // any row where an operand is NaN -- which SQRT of a negative produces routinely.
+            //
+            //   LEAST(a, b)    = (b != b || a < b) ? a : b
+            //   GREATEST(a, b) = (a != a || a > b) ? a : b
+            //
+            // Both fold left, as Flink's sequential comparison does.
+            boolean least = "LEAST".equals(name);
             String folded = operands.get(0);
             for (int i = 1; i < operands.size(); i++) {
-                folded = "TornadoMath." + reduce + "(" + folded + ", " + operands.get(i) + ")";
+                String next = operands.get(i);
+                folded =
+                        least
+                                ? "((" + next + " != " + next + " || " + folded + " < " + next
+                                        + ") ? " + folded + " : " + next + ")"
+                                : "((" + folded + " != " + folded + " || " + folded + " > " + next
+                                        + ") ? " + folded + " : " + next + ")";
             }
             return folded;
         }

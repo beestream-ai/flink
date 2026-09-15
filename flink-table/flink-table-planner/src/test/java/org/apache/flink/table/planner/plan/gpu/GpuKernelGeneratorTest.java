@@ -111,15 +111,18 @@ class GpuKernelGeneratorTest {
     @Test
     @DisplayName("LEAST folds into nested binary minima")
     void leastFoldsLeft() {
-        // LEAST(c0, c1, 2.0) -- n-ary in SQL, and TornadoMath.min takes two
+        // LEAST(c0, c1, 2.0) -- n-ary in SQL, folded left into binary comparisons.
         RexNode expr = rex.makeCall(named("LEAST"), Arrays.asList(col(0), col(1), lit(2.0)));
 
         GpuKernelSource kernel = generate(Collections.singletonList(expr), null);
 
-        assertTrue(
-                kernel.source()
-                        .contains("out0.set(i, TornadoMath.min(TornadoMath.min(c0, c1), 2.0));"),
-                kernel.source());
+        // Not TornadoMath.min: it propagates NaN and Flink's LEAST does not. See
+        // GpuNaNOrderingTest -- the device returned different answers from the CPU plan wherever
+        // an operand was NaN, which SQRT of a negative produces routinely.
+        assertFalse(kernel.source().contains("TornadoMath.min"), kernel.source());
+        assertTrue(kernel.source().contains("((c1 != c1 || c0 < c1) ? c0 : c1)"), kernel.source());
+        // Folded left: the inner result is then compared against the third operand.
+        assertTrue(kernel.source().contains("2.0) ? "), kernel.source());
     }
 
     @Test
@@ -129,7 +132,8 @@ class GpuKernelGeneratorTest {
 
         GpuKernelSource kernel = generate(Collections.singletonList(expr), null);
 
-        assertTrue(kernel.source().contains("TornadoMath.max(c0, c1)"), kernel.source());
+        assertFalse(kernel.source().contains("TornadoMath.max"), kernel.source());
+        assertTrue(kernel.source().contains("((c0 != c0 || c0 > c1) ? c0 : c1)"), kernel.source());
     }
 
     @Test

@@ -47,13 +47,12 @@ final class AccelExpressionGenerator {
     /**
      * Binary functions.
      *
-     * <p>LEAST and GREATEST are <b>deliberately absent</b>. The harness found that Flink and a
-     * naive host implementation disagree about them when an operand is NaN, and the disagreement
-     * is not a rounding difference -- it is a different answer. Guessing Flink's rule inside a test
-     * helper would paper over a real question about what the offload path should do, so the
-     * question is recorded as its own task and these two stay out until it is answered.
+     * <p>LEAST and GREATEST are back, and are worth generating precisely because they were the
+     * first real disagreement this harness found: Flink folds them with {@code Double.compareTo},
+     * whose total order puts NaN above everything, while every naive implementation reaches for
+     * {@code min}/{@code max}, which propagate it.
      */
-    private static final String[] BINARY_FN = {"POWER"};
+    private static final String[] BINARY_FN = {"POWER", "LEAST", "GREATEST"};
 
     private final Random random;
 
