@@ -121,13 +121,18 @@ class GpuMixedTypeColumnIT {
 
     @Test
     @DisplayName("and filtering on one is refused too")
-    void booleanConditionIsRefused() {
+    void booleanConditionIsNowAccepted() {
         String plan =
                 tEnv.explainSql(
                         "SELECT EXP(d) * LN(d) + SIN(d) * COS(d) + POWER(d, 3.0) AS h "
                                 + "FROM mixed WHERE b");
         String section = plan.substring(plan.indexOf("== GPU Offload =="));
-        assertTrue(section.contains("CPU"), "expected a refusal:\n" + section);
+        // This used to be refused, and the refusal was never about the query: the legacy kernel
+        // generator cannot stage a BOOLEAN, and it vetoed the whole offload path. The IR
+        // represents a BOOLEAN condition perfectly well, so a provider that can serve it now may.
+        // A provider that cannot simply declines, which is the difference between a limitation of
+        // one backend and a property of the plan.
+        assertTrue(section.contains("GPU"), "expected eligibility:\n" + section);
     }
 
     /**

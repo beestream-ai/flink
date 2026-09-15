@@ -74,6 +74,12 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
     public static void reset() {
         enabled = false;
         speedup = 10.0;
+        AccelInterpreter.corrupt = false;
+    }
+
+    /** Makes the interpreter compute TIMES as addition, to prove the harness can detect it. */
+    public static void corruptArithmetic() {
+        AccelInterpreter.corrupt = true;
     }
 
     @Override

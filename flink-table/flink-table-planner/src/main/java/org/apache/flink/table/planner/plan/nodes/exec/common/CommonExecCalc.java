@@ -264,12 +264,9 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
         if (assignment == null || !assignment.isOffloaded()) {
             return codeGenerated;
         }
+        // The legacy kernel is optional: its absence disqualifies only the pre-SPI provider.
         Optional<GpuKernelSource> kernel =
                 GpuKernelGenerator.generate(projection, condition, Integer.toString(getId()));
-        if (!kernel.isPresent()) {
-            recordGpuFallback(assignment, "expressions cannot be generated as a device kernel");
-            return codeGenerated;
-        }
         RowType inputType = (RowType) getInputEdges().get(0).getOutputType();
         Optional<AccelNode> subtree =
                 AccelIrBuilder.buildCalc(projection, condition, inputType, outputType);
@@ -279,18 +276,33 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
         }
         GpuCalcSpec spec =
                 new GpuCalcSpec(
-                        kernel.get(),
-                        kernel.get().outputLayout(),
+                        kernel.orElse(null),
+                        kernel.map(GpuKernelSource::outputLayout).orElse(passThroughLayout()),
                         outputType,
                         planner.getTableConfig().get(GpuOffloadOptions.BATCH_SIZE),
                         assignment.verdict().work(),
                         subtree.get(),
                         planner.getTableConfig().get(GpuOffloadOptions.MIN_SPEEDUP));
-        if (!spec.canStage()) {
-            recordGpuFallback(assignment, "output row cannot be staged for a device");
+        // canStage() describes what the legacy provider's fixed-width staging buffers can hold.
+        // It is not a property of the query, so it disqualifies only that provider -- one working
+        // from the IR decides for itself what it can stage.
+        if (kernel.isPresent() && !spec.canStage()) {
+            recordGpuFallback(assignment, "output row cannot be staged by the legacy provider");
             return codeGenerated;
         }
         return new GpuOrCpuCalcOperatorFactory(spec, codeGenerated);
+    }
+
+    /**
+     * Output layout when no kernel was generated: every field is computed by the provider.
+     *
+     * <p>The legacy layout distinguishes columns the kernel produces from ones staged host-side.
+     * A provider working from the IR makes that split itself, so there is nothing to describe.
+     */
+    private int[] passThroughLayout() {
+        int[] layout = new int[projection.size()];
+        java.util.Arrays.fill(layout, GpuCalcSpec.COMPUTED);
+        return layout;
     }
 
     /** Rewrites the node's verdict so EXPLAIN reports why a selected node still ran on the CPU. */

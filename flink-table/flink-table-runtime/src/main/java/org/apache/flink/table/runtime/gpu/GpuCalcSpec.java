@@ -24,6 +24,8 @@ import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.types.logical.RowType;
 
+import javax.annotation.Nullable;
+
 import java.io.Serializable;
 import java.util.Arrays;
 import java.util.List;
@@ -46,7 +48,7 @@ public final class GpuCalcSpec implements Serializable {
     /** Marks an output field produced by the kernel rather than copied from the input. */
     public static final int COMPUTED = -1;
 
-    private final GpuKernelSource kernel;
+    private final @Nullable GpuKernelSource kernel;
     private final int[] outputLayout;
     private final RowType outputType;
     private final int batchSize;
@@ -71,8 +73,22 @@ public final class GpuCalcSpec implements Serializable {
         this.minSpeedup = minSpeedup;
     }
 
-    public GpuKernelSource kernel() {
+    /**
+     * The pre-generated TornadoVM kernel, or null.
+     *
+     * <p>Null is normal. It means only that the legacy generator could not express this Calc —
+     * a pure pass-through with a filter, for instance, which it refuses because it has no computed
+     * column. That is a limitation of one provider's code generator and says nothing about whether
+     * the subtree can be accelerated: a provider reading {@link #subtree()} may well serve it.
+     * Gating the whole accelerator path on this was hiding otherwise-offloadable queries.
+     */
+    public @Nullable GpuKernelSource kernel() {
         return kernel;
+    }
+
+    /** Whether the legacy pre-generated kernel is present. */
+    public boolean hasKernel() {
+        return kernel != null;
     }
 
     /**

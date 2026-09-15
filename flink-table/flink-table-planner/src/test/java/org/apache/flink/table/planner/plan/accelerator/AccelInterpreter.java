@@ -40,6 +40,15 @@ import java.util.List;
  */
 final class AccelInterpreter {
 
+    /**
+     * When set, TIMES evaluates as addition.
+     *
+     * <p>A differential harness that has never caught anything is indistinguishable from one that
+     * cannot. This exists so a test can inject a wrong answer and assert the harness notices --
+     * evidence that green means something.
+     */
+    static volatile boolean corrupt = false;
+
     private AccelInterpreter() {}
 
     /** Whether this subtree is shaped like the one thing the interpreter handles. */
@@ -97,7 +106,7 @@ final class AccelInterpreter {
             case MINUS:
                 return a - b;
             case TIMES:
-                return a * b;
+                return corrupt ? a + b : a * b;
             case DIVIDE:
                 return a / b;
             case NEGATE:
@@ -137,9 +146,12 @@ final class AccelInterpreter {
             case SIGN:
                 return Math.signum(a);
             case LEAST:
-                return Math.min(a, b);
+                // Not Math.min: that propagates NaN, and Flink's LEAST does not. LEAST(NaN, e)
+                // is e on the CPU path, because the comparison is false and the other operand
+                // wins. Matching Flink is the point -- Flink is the reference implementation.
+                return a <= b ? a : b;
             case GREATEST:
-                return Math.max(a, b);
+                return a >= b ? a : b;
             case CAST:
                 return a;
             case EQUALS:

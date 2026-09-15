@@ -118,6 +118,10 @@ public final class AccelIrBuilder {
         BY_BUILT_IN_NAME.put("ATAN2", AccelFunction.ATAN2);
         BY_BUILT_IN_NAME.put("TANH", AccelFunction.TANH);
         BY_BUILT_IN_NAME.put("SIGN", AccelFunction.SIGN);
+        // Flink defines its own LEAST and GREATEST, so they arrive as named built-ins rather than
+        // with SqlKind.LEAST / SqlKind.GREATEST. The kind entries above never match; these do.
+        BY_BUILT_IN_NAME.put("LEAST", AccelFunction.LEAST);
+        BY_BUILT_IN_NAME.put("GREATEST", AccelFunction.GREATEST);
     }
 
     private AccelIrBuilder() {}

@@ -139,6 +139,11 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
             }
 
             // The pre-SPI path, still here until the provider moves out of tree (task M1.1).
+            if (!spec.hasKernel()) {
+                return codeGenerated(
+                        parameters,
+                        "no accelerator provider, and the legacy path needs a generated kernel");
+            }
             Optional<GpuOperatorFactoryProvider> provider =
                     GpuOperatorFactoryProvider.find(loader);
             if (!provider.isPresent()) {
