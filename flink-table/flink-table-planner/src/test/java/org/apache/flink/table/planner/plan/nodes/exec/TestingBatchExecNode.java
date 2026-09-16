@@ -124,6 +124,11 @@ public class TestingBatchExecNode implements BatchExecNode<RowData> {
     }
 
     @Override
+    public boolean isCompiled() {
+        return false;
+    }
+
+    @Override
     public String toString() {
         return description;
     }

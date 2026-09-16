@@ -211,6 +211,12 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
         isCompiled = compiled;
     }
 
+    @Override
+    @JsonIgnore
+    public boolean isCompiled() {
+        return isCompiled;
+    }
+
     /**
      * Internal method, translates this node into a Flink operator.
      *

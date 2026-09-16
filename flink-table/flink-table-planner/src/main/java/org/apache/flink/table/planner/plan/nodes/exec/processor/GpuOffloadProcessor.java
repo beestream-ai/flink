@@ -23,10 +23,16 @@ import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
 import org.apache.flink.table.planner.plan.gpu.RowCost;
+import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeGraph;
 import org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode;
+import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
+import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecAcceleratedGroup;
+import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecHashAggregate;
+import org.apache.flink.table.planner.plan.nodes.exec.common.CommonExecCalc;
 import org.apache.flink.table.planner.plan.nodes.exec.visitor.AbstractExecNodeExactlyOnceVisitor;
+import org.apache.flink.table.types.logical.RowType;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -39,10 +45,16 @@ import java.util.Map;
  * Finds maximal connected subtrees whose nodes can all run as device kernels, costs each subtree as
  * a unit, and records the decision on its nodes.
  *
- * <p>This processor does not rewrite the graph. It annotates it: the substitution — emitting one
- * offload operator per selected group instead of per-node {@code CodeGenOperatorFactory}s — happens
- * during translation, which is where each node builds its {@code Transformation}. Separating the
- * two keeps the decision in one place and makes it inspectable before anything is built.
+ * <p>Mostly it annotates rather than rewrites: the substitution — emitting one offload operator per
+ * selected group instead of per-node {@code CodeGenOperatorFactory}s — happens during translation,
+ * which is where each node builds its {@code Transformation}. Separating the two keeps the decision
+ * in one place and makes it inspectable before anything is built.
+ *
+ * <p>The one exception is fusion, and it has to be an exception. A projection feeding an aggregate
+ * becomes a single {@link BatchExecAcceleratedGroup} owning both, because a fused pair is one
+ * operator and a graph that says otherwise is lying: the absorbed node used to stay in the graph
+ * producing no transformation, which is what made the node count, {@code EXPLAIN} and the JobGraph
+ * disagree. M4.1.
  *
  * <h2>Why subtrees rather than nodes</h2>
  *
@@ -134,7 +146,93 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
             }
         }
 
-        return execGraph;
+        return fuse(execGraph, groupOf, config);
+    }
+
+    /**
+     * Replaces each fusable pair with one node owning both. M4.1.
+     *
+     * <p>A pair qualifies when the processor put a {@code Calc} and the aggregate it feeds in the
+     * same group and selected that group. Sharing a group is what says the two were judged
+     * together; feeding means there is something to fuse.
+     *
+     * <p>Skipped entirely for a compiled plan. The plan format knows the node types Flink ships and
+     * this is not one of them, so writing a plan containing it would produce something no release
+     * can read back — and M4.4 already settled that a compiled plan does not offload, which makes
+     * fusing it pointless as well as unwritable.
+     */
+    private static ExecNodeGraph fuse(
+            ExecNodeGraph execGraph, Map<ExecNode<?>, Integer> groupOf, TableConfig config) {
+        if (!config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_FUSE_AGGREGATE)) {
+            return execGraph;
+        }
+        List<ExecNode<?>> newRoots = new ArrayList<>();
+        Map<ExecNode<?>, ExecNode<?>> rewritten = new IdentityHashMap<>();
+        for (ExecNode<?> root : execGraph.getRootNodes()) {
+            newRoots.add(rewrite(root, groupOf, rewritten));
+        }
+        return new ExecNodeGraph(execGraph.getFlinkVersion(), newRoots);
+    }
+
+    /** Rebuilds the sub-graph below {@code node}, substituting fused pairs as it goes. */
+    private static ExecNode<?> rewrite(
+            ExecNode<?> node,
+            Map<ExecNode<?>, Integer> groupOf,
+            Map<ExecNode<?>, ExecNode<?>> rewritten) {
+        ExecNode<?> already = rewritten.get(node);
+        if (already != null) {
+            return already;
+        }
+        List<ExecEdge> edges = node.getInputEdges();
+        for (int i = 0; i < edges.size(); i++) {
+            ExecNode<?> newSource = rewrite(edges.get(i).getSource(), groupOf, rewritten);
+            if (newSource != edges.get(i).getSource()) {
+                node.replaceInputEdge(i, ExecEdge.builder().source(newSource).target(node).build());
+            }
+        }
+        ExecNode<?> result = fuseIfPossible(node, groupOf);
+        rewritten.put(node, result);
+        return result;
+    }
+
+    /** The fused node, or the node unchanged. */
+    private static ExecNode<?> fuseIfPossible(ExecNode<?> node, Map<ExecNode<?>, Integer> groupOf) {
+        if (node.isCompiled() || !(node instanceof BatchExecHashAggregate)) {
+            return node;
+        }
+        BatchExecHashAggregate aggregate = (BatchExecHashAggregate) node;
+        GpuOffloadAssignment mine = aggregate.getGpuOffloadAssignment();
+        if (mine == null || !mine.isOffloaded()) {
+            return node;
+        }
+        ExecNode<?> input = aggregate.getInputEdges().get(0).getSource();
+        if (!(input instanceof CommonExecCalc)) {
+            return node;
+        }
+        Integer theirGroup = groupOf.get(input);
+        if (theirGroup == null || !theirGroup.equals(mine.groupId())) {
+            return node;
+        }
+        CommonExecCalc calc = (CommonExecCalc) input;
+        BatchExecAcceleratedGroup fused =
+                new BatchExecAcceleratedGroup(
+                        calc,
+                        aggregate,
+                        InputProperty.DEFAULT,
+                        (RowType) aggregate.getOutputType(),
+                        "AcceleratedGroup("
+                                + calc.getDescription()
+                                + ", "
+                                + aggregate.getDescription()
+                                + ")");
+        fused.setInputEdges(
+                Collections.singletonList(
+                        ExecEdge.builder()
+                                .source(calc.getInputEdges().get(0).getSource())
+                                .target(fused)
+                                .build()));
+        fused.setGpuOffloadAssignment(mine);
+        return fused;
     }
 
     private static Integer merge(

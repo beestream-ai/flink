@@ -21,11 +21,7 @@ package org.apache.flink.table.planner.plan.nodes.exec.batch;
 import org.apache.flink.FlinkVersion;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
-import org.apache.flink.streaming.api.operators.StreamOperator;
-import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
-import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
@@ -36,8 +32,6 @@ import org.apache.flink.table.planner.plan.fusion.OpFusionCodegenSpecGenerator;
 import org.apache.flink.table.planner.plan.fusion.generator.OneInputOpFusionCodegenSpecGenerator;
 import org.apache.flink.table.planner.plan.fusion.spec.HashAggFusionCodegenSpec;
 import org.apache.flink.table.planner.plan.gpu.GpuAggregateSupport;
-import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
-import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
 import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
@@ -47,13 +41,11 @@ import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeContext;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeMetadata;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTranslator;
-import org.apache.flink.table.planner.plan.nodes.exec.common.CommonExecCalc;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.planner.plan.utils.AggregateInfoList;
 import org.apache.flink.table.planner.plan.utils.AggregateUtil;
 import org.apache.flink.table.planner.utils.JavaScalaConversionUtil;
 import org.apache.flink.table.runtime.generated.GeneratedOperator;
-import org.apache.flink.table.runtime.gpu.ChainedCalcAggregateOperator;
 import org.apache.flink.table.runtime.operators.CodeGenOperatorFactory;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
@@ -62,8 +54,6 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCre
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 
 import org.apache.calcite.rel.core.AggregateCall;
-
-import javax.annotation.Nullable;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -175,18 +165,40 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
     protected Transformation<RowData> translateToPlanInternal(
             PlannerBase planner, ExecNodeConfig config) {
         final ExecEdge inputEdge = getInputEdges().get(0);
-        final CommonExecCalc fusedCalc = fusedCalc(config);
-        // When a Calc is fused into this node it produces no transformation of its own: this
-        // operator consumes what the Calc would have consumed, and runs the Calc's work itself --
-        // as a kernel writing to a device buffer the contraction then reads, or as the generated
-        // Calc operator chained ahead of the generated aggregate when there is no device.
         final Transformation<RowData> inputTransform =
-                (Transformation<RowData>)
-                        (fusedCalc == null
-                                ? inputEdge.translateToPlan(planner)
-                                : fusedCalc.getInputEdges().get(0).translateToPlan(planner));
+                (Transformation<RowData>) inputEdge.translateToPlan(planner);
 
-        final RowType inputRowType = (RowType) inputEdge.getOutputType();
+        final GeneratedAggregate generated = generateAggregateOperator(planner, config);
+        return ExecNodeUtil.createOneInputTransformation(
+                inputTransform,
+                createTransformationMeta(HASH_AGGREGATE_TRANSFORMATION, config),
+                generated.factory,
+                InternalTypeInfo.of((RowType) getOutputType()),
+                inputTransform.getParallelism(),
+                generated.managedMemory,
+                false);
+    }
+
+    /** The generated aggregate operator, and the managed memory it needs. */
+    static final class GeneratedAggregate {
+        final CodeGenOperatorFactory<RowData> factory;
+        final long managedMemory;
+
+        GeneratedAggregate(CodeGenOperatorFactory<RowData> factory, long managedMemory) {
+            this.factory = factory;
+            this.managedMemory = managedMemory;
+        }
+    }
+
+    /**
+     * Generates this node's operator without translating its input.
+     *
+     * <p>Separated so that {@link BatchExecAcceleratedGroup} can build it after absorbing this
+     * node: a fused group owns both members and emits one operator, so it needs the aggregate's
+     * code-generated half without the transformation that would otherwise come with it. M4.1.
+     */
+    GeneratedAggregate generateAggregateOperator(PlannerBase planner, ExecNodeConfig config) {
+        final RowType inputRowType = (RowType) getInputEdges().get(0).getOutputType();
         final RowType outputRowType = (RowType) getOutputType();
 
         final CodeGeneratorContext ctx =
@@ -239,160 +251,8 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
                                             .getBytes());
         }
 
-        final CodeGenOperatorFactory<RowData> aggregateFactory =
-                new CodeGenOperatorFactory<>(generatedOperator);
-        return ExecNodeUtil.createOneInputTransformation(
-                inputTransform,
-                createTransformationMeta(HASH_AGGREGATE_TRANSFORMATION, config),
-                wrapForFusedGpuOffload(
-                        planner, config, fusedCalc, inputTransform, aggregateFactory),
-                InternalTypeInfo.of(outputRowType),
-                inputTransform.getParallelism(),
-                managedMemory,
-                false);
-    }
-
-    /**
-     * The {@code Calc} feeding this node, when the offload processor put the two in one subtree.
-     *
-     * <p>Both conditions matter. Sharing a group means the processor judged the pair together and
-     * decided the subtree was worth offloading; being a {@code Calc} means there is an expression
-     * to fuse. Either missing and this is an ordinary aggregate.
-     *
-     * @return the fused Calc, or null
-     */
-    private @Nullable CommonExecCalc fusedCalc(ExecNodeConfig config) {
-        if (!config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_FUSE_AGGREGATE)) {
-            // Left unfused deliberately. The Calc still offloads on its own and this aggregate
-            // still runs the generated operator, which is the shape to measure fusion against.
-            return null;
-        }
-        GpuOffloadAssignment mine = getGpuOffloadAssignment();
-        if (mine == null || !mine.isOffloaded()) {
-            return null;
-        }
-        if (config.isCompiled()) {
-            // M4.4. Fusion is driven by the same transient assignment the Calc's device route is,
-            // so a restored plan would fuse nothing while the in-memory CompiledPlan it was
-            // written from would fuse. A compiled plan that translates into different operators
-            // depending on whether it has been through a file is not a compiled plan.
-            recordFallback(BatchExecCalc.COMPILED_PLAN_REASON);
-            return null;
-        }
-        ExecNode<?> input = getInputEdges().get(0).getSource();
-        if (!(input instanceof CommonExecCalc)) {
-            return null;
-        }
-        GpuOffloadAssignment theirs = input.getGpuOffloadAssignment();
-        if (theirs == null || !theirs.isOffloaded() || theirs.groupId() != mine.groupId()) {
-            return null;
-        }
-        return (CommonExecCalc) input;
-    }
-
-    /**
-     * Builds the operator that carries both halves, or leaves the generated aggregate alone.
-     *
-     * <p>A fused pair has no accelerator route at all for now, so what is decided here is only
-     * whether a Calc was absorbed and therefore has to be run from inside this node. See the note
-     * below for why the device route is absent rather than deferred to the TaskManager.
-     */
-    private StreamOperatorFactory<RowData> wrapForFusedGpuOffload(
-            PlannerBase planner,
-            ExecNodeConfig config,
-            @Nullable CommonExecCalc fusedCalc,
-            Transformation<RowData> inputTransform,
-            CodeGenOperatorFactory<RowData> aggregateFactory) {
-        if (fusedCalc == null) {
-            return aggregateFactory;
-        }
-        // The device route for a fused aggregate is deliberately not offered.
-        //
-        // It was the only thing left requiring the planner to generate a vendor kernel, and that
-        // dependency is what stopped the extension point being proposable on its own terms. The
-        // path is also already a known blocker in its own right: absorbing the Calc here leaves
-        // that ExecNode with no Transformation, so EXPLAIN and the running topology disagree
-        // (review finding C1). Task M4.1 replaces the whole arrangement with a graph rewrite that
-        // produces one node, and restoring the device route belongs there rather than here --
-        // migrating it now would mean migrating it twice, onto a shape that is going to change.
-        //
-        // Until then the pair still runs as one operator, with the generated Calc chained ahead of
-        // the generated aggregate. Results are unchanged; only the device is absent.
-        recordFallback(
-                "a fused aggregate has no accelerator route until fusion becomes a graph "
-                        + "rewrite (task M4.1)");
-        return chainedOnly(planner, config, fusedCalc, inputTransform, aggregateFactory);
-    }
-
-    /**
-     * The fused pair with no device path: still one operator, because the Calc has no
-     * transformation of its own once fused, and still both generated operators.
-     */
-    private StreamOperatorFactory<RowData> chainedOnly(
-            PlannerBase planner,
-            ExecNodeConfig config,
-            CommonExecCalc fusedCalc,
-            Transformation<RowData> inputTransform,
-            CodeGenOperatorFactory<RowData> aggregateFactory) {
-        return new ChainedOnlyFactory(
-                calcFactoryFor(planner, config, fusedCalc, inputTransform), aggregateFactory);
-    }
-
-    private CodeGenOperatorFactory<RowData> calcFactoryFor(
-            PlannerBase planner,
-            ExecNodeConfig config,
-            CommonExecCalc fusedCalc,
-            Transformation<RowData> inputTransform) {
-        CodeGeneratorContext calcCtx =
-                new CodeGeneratorContext(config, planner.getFlinkContext().getClassLoader());
-        return fusedCalc.generateCalcOperator(calcCtx, inputTransform);
-    }
-
-    /** Rewrites the verdict so EXPLAIN reports why a selected pair still ran on the CPU. */
-    private void recordFallback(String reason) {
-        GpuOffloadAssignment assignment = getGpuOffloadAssignment();
-        if (assignment != null) {
-            setGpuOffloadAssignment(
-                    new GpuOffloadAssignment(
-                            assignment.groupId(),
-                            GpuOffloadDecision.fallback(assignment.verdict(), reason)));
-        }
-    }
-
-    /**
-     * The fused pair as one operator, with no device path offered at all.
-     *
-     * <p>Fusion absorbs the {@code Calc} into this node, so that {@code ExecNode} produces no
-     * transformation of its own and its expressions have nowhere else to run. This factory keeps
-     * them running by building both generated operators on the TaskManager and wiring the Calc's
-     * output straight into the aggregate's input, so the pair executes as a single operator exactly
-     * as the fused plan describes.
-     */
-    private static final class ChainedOnlyFactory extends AbstractStreamOperatorFactory<RowData> {
-
-        private static final long serialVersionUID = 1L;
-
-        private final StreamOperatorFactory<RowData> calcFactory;
-        private final StreamOperatorFactory<RowData> aggregateFactory;
-
-        private ChainedOnlyFactory(
-                StreamOperatorFactory<RowData> calcFactory,
-                StreamOperatorFactory<RowData> aggregateFactory) {
-            this.calcFactory = calcFactory;
-            this.aggregateFactory = aggregateFactory;
-        }
-
-        @Override
-        public <T extends StreamOperator<RowData>> T createStreamOperator(
-                StreamOperatorParameters<RowData> parameters) {
-            return ChainedCalcAggregateOperator.chain(
-                    parameters, calcFactory, aggregateFactory, processingTimeService);
-        }
-
-        @Override
-        public Class<? extends StreamOperator> getStreamOperatorClass(ClassLoader classLoader) {
-            return aggregateFactory.getStreamOperatorClass(classLoader);
-        }
+        return new GeneratedAggregate(
+                new CodeGenOperatorFactory<>(generatedOperator), managedMemory);
     }
 
     /**

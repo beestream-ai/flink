@@ -154,4 +154,13 @@ public interface ExecNode<T>
      * properties might be impacted by this (e.g. UID generation for transformations).
      */
     void setCompiled(boolean isCompiled);
+
+    /**
+     * Whether this node came from, or is destined for, a compiled plan.
+     *
+     * <p>Set during deserialization and when a plan is being compiled. A graph processor that
+     * rewrites nodes needs it: the plan format only knows the node types Flink ships, so a rewrite
+     * that introduces another one must not run while a plan is being written. M4.1, M4.4.
+     */
+    boolean isCompiled();
 }
