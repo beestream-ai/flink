@@ -20,6 +20,7 @@ package org.apache.flink.table.planner.plan.gpu;
 
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -49,7 +50,7 @@ class GpuMixedTypeColumnIT {
         tEnv.executeSql(
                 "CREATE TABLE mixed (id BIGINT NOT NULL, i INT NOT NULL, f FLOAT NOT NULL, d DOUBLE NOT NULL, b BOOLEAN NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '2000000')");
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
     }
 
     private void assertOffloads(String label, String sql) {

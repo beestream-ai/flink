@@ -21,6 +21,7 @@ package org.apache.flink.table.planner.plan.gpu;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.api.internal.TableEnvironmentImpl;
 import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
@@ -66,7 +67,7 @@ class GpuOffloadProcessorIT {
     }
 
     private void enable() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
     }
 
     /** Plans {@code sql} through the processor pipeline and returns every Calc in the graph. */

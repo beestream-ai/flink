@@ -38,7 +38,6 @@ import org.apache.flink.table.planner.plan.fusion.spec.HashAggFusionCodegenSpec;
 import org.apache.flink.table.planner.plan.gpu.GpuAggregateSupport;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
-import org.apache.flink.table.planner.plan.gpu.GpuOffloadOptions;
 import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
@@ -263,7 +262,7 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
      * @return the fused Calc, or null
      */
     private @Nullable CommonExecCalc fusedCalc(ExecNodeConfig config) {
-        if (!config.get(GpuOffloadOptions.FUSE_AGGREGATE)) {
+        if (!config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_FUSE_AGGREGATE)) {
             // Left unfused deliberately. The Calc still offloads on its own and this aggregate
             // still runs the generated operator, which is the shape to measure fusion against.
             return null;

@@ -20,6 +20,7 @@ package org.apache.flink.table.planner.plan.gpu;
 
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 
@@ -79,7 +80,7 @@ class GpuFusedAggregateResultIT {
                         + " CAST(MOD(id, 4) + 1 AS INT) AS k,"
                         + " CAST(id AS DOUBLE) / 1000.0E0 + 0.5E0 AS val"
                         + " FROM seq");
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, offload);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, offload);
         // Without this the subtree is below the total-work floor at this row count and neither arm
         // offloads, so the comparison passes by testing the same CPU plan against itself. The
         // first version of this test did exactly that.

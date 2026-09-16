@@ -19,9 +19,9 @@
 package org.apache.flink.table.planner.plan.nodes.exec.processor;
 
 import org.apache.flink.table.api.TableConfig;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
-import org.apache.flink.table.planner.plan.gpu.GpuOffloadOptions;
 import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeGraph;
@@ -71,7 +71,7 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
     @Override
     public ExecNodeGraph process(ExecNodeGraph execGraph, ProcessorContext context) {
         TableConfig config = context.getPlanner().getTableConfig();
-        if (!config.get(GpuOffloadOptions.ENABLED)) {
+        if (!config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED)) {
             return execGraph;
         }
         // No thresholds: the planner decides what is expressible, not what is worth moving.

@@ -32,6 +32,7 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.streaming.api.graph.StreamingJobGraphGenerator;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.types.Row;
 
 import org.junit.jupiter.api.DisplayName;
@@ -73,11 +74,17 @@ class GpuPlacementSchedulerIT {
         t.executeSql(
                 "CREATE TABLE t (id BIGINT NOT NULL, val DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '1000')");
-        t.getConfig().set(GpuOffloadOptions.ENABLED, true);
-        t.getConfig().set(GpuOffloadOptions.REQUIRE_DEVICE, true);
-        t.getConfig().set(GpuOffloadOptions.DEVICE_CPU_CORES, 0.5);
-        t.getConfig().set(GpuOffloadOptions.DEVICE_TASK_HEAP, MemorySize.parse("128m"));
-        t.getConfig().set(GpuOffloadOptions.DEVICE_TASK_OFF_HEAP, MemorySize.parse("64m"));
+        t.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        t.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_REQUIRE_DEVICE, true);
+        t.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_CPU_CORES, 0.5);
+        t.getConfig()
+                .set(
+                        ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_TASK_HEAP,
+                        MemorySize.parse("128m"));
+        t.getConfig()
+                .set(
+                        ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_TASK_OFF_HEAP,
+                        MemorySize.parse("64m"));
         t.toDataStream(
                         t.sqlQuery(
                                 "SELECT EXP(val) * LN(val) + SIN(val) * COS(val)"

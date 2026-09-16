@@ -20,6 +20,7 @@ package org.apache.flink.table.planner.plan.gpu;
 
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 
@@ -52,7 +53,7 @@ class GpuSubstitutionIT {
         tEnv.executeSql(
                 "CREATE TABLE t (id BIGINT NOT NULL, val DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '200')");
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         // Floors of 1 so even a trivial expression is selected, isolating the fallback from the
         // cost decision.
 
@@ -88,7 +89,7 @@ class GpuSubstitutionIT {
         tEnv.executeSql(
                 "CREATE TABLE s (word STRING, n INT) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '10')");
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
 
         String plan = tEnv.explainSql("SELECT word, n + 1 AS m FROM s WHERE n > 0");
 

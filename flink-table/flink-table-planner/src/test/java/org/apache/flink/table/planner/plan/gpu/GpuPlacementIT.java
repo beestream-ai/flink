@@ -21,6 +21,7 @@ package org.apache.flink.table.planner.plan.gpu;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -54,13 +55,16 @@ class GpuPlacementIT {
         tEnv.executeSql(
                 "CREATE TABLE t (id BIGINT NOT NULL, val DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '2000000')");
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
     }
 
     private void requireDevice() {
-        tEnv.getConfig().set(GpuOffloadOptions.REQUIRE_DEVICE, true);
-        tEnv.getConfig().set(GpuOffloadOptions.DEVICE_CPU_CORES, 1.0);
-        tEnv.getConfig().set(GpuOffloadOptions.DEVICE_TASK_HEAP, MemorySize.parse("1 gb"));
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_REQUIRE_DEVICE, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_CPU_CORES, 1.0);
+        tEnv.getConfig()
+                .set(
+                        ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_TASK_HEAP,
+                        MemorySize.parse("1 gb"));
     }
 
     @Test
@@ -86,11 +90,14 @@ class GpuPlacementIT {
     @Test
     @DisplayName("and an under-specified one fails with a reason, not with Flink's")
     void refusesAHalfSpecifiedSlot() {
-        tEnv.getConfig().set(GpuOffloadOptions.REQUIRE_DEVICE, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_REQUIRE_DEVICE, true);
         IllegalArgumentException thrown =
                 assertThrows(IllegalArgumentException.class, () -> tEnv.explainSql(HEAVY));
         assertTrue(
-                thrown.getMessage().contains(GpuOffloadOptions.DEVICE_CPU_CORES.key()),
+                thrown.getMessage()
+                        .contains(
+                                ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_CPU_CORES
+                                        .key()),
                 thrown.getMessage());
     }
 
@@ -105,7 +112,10 @@ class GpuPlacementIT {
     @DisplayName("the default slot sharing group is refused rather than silently ignored")
     void refusesTheDefaultGroup() {
         requireDevice();
-        tEnv.getConfig().set(GpuOffloadOptions.DEVICE_SLOT_SHARING_GROUP, "default");
+        tEnv.getConfig()
+                .set(
+                        ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_SLOT_SHARING_GROUP,
+                        "default");
         IllegalArgumentException thrown =
                 assertThrows(IllegalArgumentException.class, () -> tEnv.explainSql(HEAVY));
         assertTrue(thrown.getMessage().contains("silently dropped"), thrown.getMessage());
@@ -115,7 +125,7 @@ class GpuPlacementIT {
     @Test
     @DisplayName("a query that does not offload asks for nothing, even half-configured")
     void requiringADeviceDemandsAWholeSlotSpecification() {
-        tEnv.getConfig().set(GpuOffloadOptions.REQUIRE_DEVICE, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_REQUIRE_DEVICE, true);
 
         // Every expressible query is eligible now, so asking for a device is no longer something
         // only heavy queries trigger. Flink rejects a slot sharing group naming an external

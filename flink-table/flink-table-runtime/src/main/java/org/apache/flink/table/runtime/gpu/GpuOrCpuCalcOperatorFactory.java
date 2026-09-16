@@ -173,7 +173,7 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
      * What this machine tells the provider about the task it is being built into.
      *
      * <p>The batch size is the part worth reading. Until M3.1 it was whatever {@code
-     * table.exec.gpu-offload.batch-size} said, which is a number chosen once, in a config file, by
+     * table.exec.accelerator.batch-size} said, which is a number chosen once, in a config file, by
      * someone who could not know how much memory the slot running this task would have or how wide
      * its rows would be. It is now a <em>ceiling</em>: the operator asks the slot what it has,
      * works out how many rows of this width fit, and takes the smaller of the two.

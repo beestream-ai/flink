@@ -22,13 +22,13 @@ import org.apache.flink.api.dag.Transformation
 import org.apache.flink.configuration.ExecutionOptions
 import org.apache.flink.runtime.scheduler.adaptivebatch.{BatchExecutionOptionsInternal, StreamGraphOptimizationStrategy}
 import org.apache.flink.table.api._
-import org.apache.flink.table.api.config.OptimizerConfigOptions
+import org.apache.flink.table.api.config.{ExecutionConfigOptions, OptimizerConfigOptions}
 import org.apache.flink.table.catalog.{CatalogManager, FunctionCatalog}
 import org.apache.flink.table.delegation.{Executor, InternalPlan}
 import org.apache.flink.table.module.ModuleManager
 import org.apache.flink.table.operations.Operation
 import org.apache.flink.table.planner.plan.`trait`.FlinkRelDistributionTraitDef
-import org.apache.flink.table.planner.plan.gpu.{GpuOffloadExplain, GpuOffloadOptions}
+import org.apache.flink.table.planner.plan.gpu.GpuOffloadExplain
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeGraph
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecNode
 import org.apache.flink.table.planner.plan.nodes.exec.processor.{AdaptiveJoinProcessor, DeadlockBreakupProcessor, DynamicFilteringDependencyProcessor, ExecNodeGraphProcessor, ForwardHashExchangeProcessor, GpuOffloadProcessor, MultipleInputNodeCreationProcessor}
@@ -88,7 +88,7 @@ class BatchPlanner(
     // Last: it annotates rather than rewrites, so it must see the final node structure. In
     // particular multiple-input creation has already grouped what it is going to group, and the
     // offload grouping should not disagree with it. Gated internally on
-    // table.exec.gpu-offload.enabled, so this is a no-op unless the flag is set.
+    // table.exec.accelerator.enabled, so this is a no-op unless the flag is set.
     processors.add(new GpuOffloadProcessor)
     processors
   }
@@ -184,7 +184,7 @@ class BatchPlanner(
 
     // Only when the feature is on: the processor annotates without changing the plan, so an
     // offloaded and a rejected plan are otherwise indistinguishable in EXPLAIN.
-    if (getTableConfig.get(GpuOffloadOptions.ENABLED)) {
+    if (getTableConfig.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED)) {
       val offload = GpuOffloadExplain.format(execGraph)
       if (offload.nonEmpty) {
         sb.append(System.lineSeparator)

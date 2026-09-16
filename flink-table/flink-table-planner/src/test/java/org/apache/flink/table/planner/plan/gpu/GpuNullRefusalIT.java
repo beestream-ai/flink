@@ -20,6 +20,7 @@ package org.apache.flink.table.planner.plan.gpu;
 
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -62,7 +63,7 @@ class GpuNullRefusalIT {
         tEnv.executeSql(
                 "CREATE TABLE declared (a DOUBLE NOT NULL, b DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '10')");
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
     }
 
     private String offloadSection(String sql) {

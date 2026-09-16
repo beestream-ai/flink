@@ -20,6 +20,7 @@ package org.apache.flink.table.planner.plan.gpu;
 
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -60,7 +61,7 @@ class GpuOffloadExplainIT {
     @Test
     @DisplayName("show the rendered section")
     void showOutput() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         for (String sql : new String[] {CHEAP, HEAVY}) {
             String plan = tEnv.explainSql(sql);
             System.out.println("---------- " + sql);
@@ -71,7 +72,7 @@ class GpuOffloadExplainIT {
     @Test
     @DisplayName("a cheap query reports its work, and says where the decision is made")
     void rejectionIsExplained() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         String plan = tEnv.explainSql(CHEAP);
 
         assertTrue(plan.contains("== GPU Offload =="), plan);
@@ -84,7 +85,7 @@ class GpuOffloadExplainIT {
     @Test
     @DisplayName("a selected node reports GPU even where the client has no device")
     void selectionIsReportedIndependentlyOfTheClient() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         String plan = tEnv.explainSql(HEAVY);
 
         assertTrue(plan.contains("== GPU Offload =="), plan);
@@ -102,7 +103,7 @@ class GpuOffloadExplainIT {
     @Test
     @DisplayName("an inexpressible type is reported as such, not as merely too cheap")
     void inexpressibleIsExplained() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         tEnv.executeSql(
                 "CREATE TABLE s (word STRING, n INT) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '10')");
@@ -114,7 +115,7 @@ class GpuOffloadExplainIT {
     @Test
     @DisplayName("a nullable column is eligible too, and costs a byte more to carry")
     void nullableColumnIsEligibleAndCostsMore() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         // Same heavy expression, same shape, same row count -- the only difference is the DDL.
         tEnv.executeSql(
                 "CREATE TABLE nullable_t (id BIGINT, val DOUBLE) WITH ("

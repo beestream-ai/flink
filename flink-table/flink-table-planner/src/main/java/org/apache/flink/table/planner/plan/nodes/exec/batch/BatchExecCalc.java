@@ -26,6 +26,7 @@ import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.api.transformations.OneInputTransformation;
 import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
 import org.apache.flink.table.planner.delegation.PlannerBase;
@@ -36,7 +37,6 @@ import org.apache.flink.table.planner.plan.fusion.spec.CalcFusionCodegenSpec;
 import org.apache.flink.table.planner.plan.gpu.GpuCostEstimator;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
-import org.apache.flink.table.planner.plan.gpu.GpuOffloadOptions;
 import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
@@ -214,7 +214,9 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
         if (bytesPerRow <= 0) {
             return;
         }
-        long wanted = (long) bytesPerRow * config.get(GpuOffloadOptions.BATCH_SIZE);
+        long wanted =
+                (long) bytesPerRow
+                        * config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE);
         ExecNodeUtil.setManagedMemoryWeight(transform, wanted);
     }
 
@@ -234,31 +236,35 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
      */
     private void requestDeviceIfConfigured(
             PlannerBase planner, ExecNodeConfig config, Transformation<RowData> transform) {
-        if (!config.get(GpuOffloadOptions.REQUIRE_DEVICE)) {
+        if (!config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_REQUIRE_DEVICE)) {
             return;
         }
 
-        final Double cpuCores = config.getOptional(GpuOffloadOptions.DEVICE_CPU_CORES).orElse(null);
+        final Double cpuCores =
+                config.getOptional(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_CPU_CORES)
+                        .orElse(null);
         final MemorySize taskHeap =
-                config.getOptional(GpuOffloadOptions.DEVICE_TASK_HEAP).orElse(null);
+                config.getOptional(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_TASK_HEAP)
+                        .orElse(null);
         if (cpuCores == null || taskHeap == null) {
             // Fail here rather than let SlotSharingGroup.build() throw: it would report that cpu
             // and heap are required without saying which of this fork's options asked for them.
             throw new IllegalArgumentException(
-                    GpuOffloadOptions.REQUIRE_DEVICE.key()
+                    ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_REQUIRE_DEVICE.key()
                             + " needs a whole slot specification, because Flink rejects a slot "
                             + "sharing group that names an external resource without also naming "
                             + "cpu cores and task heap. Set "
-                            + GpuOffloadOptions.DEVICE_CPU_CORES.key()
+                            + ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_CPU_CORES.key()
                             + " and "
-                            + GpuOffloadOptions.DEVICE_TASK_HEAP.key()
+                            + ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_TASK_HEAP.key()
                             + " to values that suit the cluster.");
         }
 
-        final String groupName = config.get(GpuOffloadOptions.DEVICE_SLOT_SHARING_GROUP);
-        if (GpuOffloadOptions.DEFAULT_SLOT_SHARING_GROUP_NAME.equals(groupName)) {
+        final String groupName =
+                config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_SLOT_SHARING_GROUP);
+        if (ExecutionConfigOptions.DEFAULT_SLOT_SHARING_GROUP_NAME.equals(groupName)) {
             throw new IllegalArgumentException(
-                    GpuOffloadOptions.DEVICE_SLOT_SHARING_GROUP.key()
+                    ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_SLOT_SHARING_GROUP.key()
                             + " cannot be \"default\". Flink resolves a vertex in the default "
                             + "group to its region's slot sharing group and never reads the "
                             + "resources registered under that name, so the requirement would be "
@@ -268,10 +274,17 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
                 SlotSharingGroup.newBuilder(groupName)
                         .setCpuCores(cpuCores)
                         .setTaskHeapMemory(taskHeap)
-                        .setTaskOffHeapMemory(config.get(GpuOffloadOptions.DEVICE_TASK_OFF_HEAP))
+                        .setTaskOffHeapMemory(
+                                config.get(
+                                        ExecutionConfigOptions
+                                                .TABLE_EXEC_ACCELERATOR_DEVICE_TASK_OFF_HEAP))
                         .setExternalResource(
-                                config.get(GpuOffloadOptions.DEVICE_RESOURCE_NAME),
-                                config.get(GpuOffloadOptions.DEVICE_RESOURCE_AMOUNT))
+                                config.get(
+                                        ExecutionConfigOptions
+                                                .TABLE_EXEC_ACCELERATOR_DEVICE_RESOURCE_NAME),
+                                config.get(
+                                        ExecutionConfigOptions
+                                                .TABLE_EXEC_ACCELERATOR_DEVICE_RESOURCE_AMOUNT))
                         .build();
 
         // Registering carries the resources; setting the group on the transformation is what puts
@@ -285,8 +298,8 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
         LOG.info(
                 "GPU offload requests a slot declaring {}={} in slot sharing group '{}' "
                         + "(cpu {}, task heap {})",
-                config.get(GpuOffloadOptions.DEVICE_RESOURCE_NAME),
-                config.get(GpuOffloadOptions.DEVICE_RESOURCE_AMOUNT),
+                config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_RESOURCE_NAME),
+                config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_RESOURCE_AMOUNT),
                 groupName,
                 cpuCores,
                 taskHeap);
@@ -338,8 +351,10 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
                         subtree.get(),
                         assignment.verdict().work(),
                         outputType,
-                        planner.getTableConfig().get(GpuOffloadOptions.BATCH_SIZE),
-                        planner.getTableConfig().get(GpuOffloadOptions.MIN_SPEEDUP));
+                        planner.getTableConfig()
+                                .get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE),
+                        planner.getTableConfig()
+                                .get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
         return new GpuOrCpuCalcOperatorFactory(spec, codeGenerated);
     }
 

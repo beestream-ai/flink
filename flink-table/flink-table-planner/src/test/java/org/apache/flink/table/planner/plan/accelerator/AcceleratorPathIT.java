@@ -21,7 +21,7 @@ package org.apache.flink.table.planner.plan.accelerator;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
-import org.apache.flink.table.planner.plan.gpu.GpuOffloadOptions;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 
@@ -129,7 +129,7 @@ class AcceleratorPathIT {
     @Test
     @DisplayName("the accelerator path actually runs, and the provider sees the rows")
     void acceleratorPathRuns() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         TestAcceleratorProvider.enable(10.0);
 
         List<Row> rows = run(QUERY);
@@ -146,7 +146,7 @@ class AcceleratorPathIT {
     @Test
     @DisplayName("with no provider willing, the CPU runs and the results are identical")
     void resultsMatchTheCpuPath() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         TestAcceleratorProvider.enable(10.0);
         List<Row> accelerated = run(QUERY);
         int seen = TestAcceleratorProvider.ROWS_PROCESSED.get();
@@ -177,7 +177,7 @@ class AcceleratorPathIT {
     @Test
     @DisplayName("a null in a pass-through column survives the accelerator as a null, not a zero")
     void nullPassThroughSurvives() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         TestAcceleratorProvider.enable(4.0);
 
         List<Row> accelerated = run(NULLABLE_QUERY);
@@ -197,7 +197,7 @@ class AcceleratorPathIT {
     @Test
     @DisplayName("and the CPU produces exactly the same rows for the same query")
     void nullPassThroughMatchesTheCpuPath() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         TestAcceleratorProvider.enable(4.0);
         List<Row> accelerated = run(NULLABLE_QUERY);
         int seen = TestAcceleratorProvider.ROWS_PROCESSED.get();
@@ -226,7 +226,7 @@ class AcceleratorPathIT {
     @Test
     @DisplayName("a FLOAT expression is left on the CPU rather than offloaded")
     void floatExpressionStaysOnTheCpu() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         TestAcceleratorProvider.enable(10.0);
 
         List<Row> accelerated = run(FLOAT_QUERY);
@@ -244,7 +244,7 @@ class AcceleratorPathIT {
     /**
      * The slot's managed memory decides the batch size; the configured value is only a ceiling.
      *
-     * <p>Before M3.1 the provider was told whatever {@code table.exec.gpu-offload.batch-size} said
+     * <p>Before M3.1 the provider was told whatever {@code table.exec.accelerator.batch-size} said
      * — a number chosen once, in a config file, by someone who could not know how much memory the
      * slot running the task would have or how wide its rows would be. The staging it sized was
      * invisible to Flink besides.
@@ -256,7 +256,7 @@ class AcceleratorPathIT {
     @Test
     @DisplayName("the batch size comes from the slot's budget, not from the configured ceiling")
     void batchSizeComesFromTheSlotBudget() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         TestAcceleratorProvider.enable(10.0);
 
         run(QUERY);
@@ -269,7 +269,9 @@ class AcceleratorPathIT {
         assertThat(TestAcceleratorProvider.LAST_MAX_BATCH_SIZE.get())
                 .as("the provider must be handed the slot's answer, not the config's")
                 .isPositive()
-                .isLessThan(tEnv.getConfig().get(GpuOffloadOptions.BATCH_SIZE));
+                .isLessThan(
+                        tEnv.getConfig()
+                                .get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE));
     }
 
     /**
@@ -284,7 +286,7 @@ class AcceleratorPathIT {
     @Test
     @DisplayName("the gauge reads 1 when a provider served the subtask")
     void acceleratedSubtaskReportsItself() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         TestAcceleratorProvider.enable(10.0);
 
         run(QUERY);
@@ -312,7 +314,7 @@ class AcceleratorPathIT {
     @DisplayName(
             "a device failing in open() finishes on the generated operator, with the same rows")
     void deviceFailingAtOpenFallsBack() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         TestAcceleratorProvider.enable(10.0);
         TestAcceleratorProvider.failOnOpen();
 
@@ -330,7 +332,7 @@ class AcceleratorPathIT {
     @Test
     @DisplayName("a provider claiming to be slower is refused, and the CPU runs instead")
     void slowProviderIsRefused() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         // 0.54x is the measured figure for the query the planner used to refuse at plan time.
         TestAcceleratorProvider.enable(0.54);
 
@@ -348,7 +350,7 @@ class AcceleratorPathIT {
     @Test
     @DisplayName("the provider declines by default, so its presence reroutes nothing")
     void declinesUnlessEnabled() {
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
 
         run(QUERY);
 

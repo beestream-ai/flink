@@ -49,7 +49,7 @@ import java.util.List;
 public final class GpuOffloadDecision {
 
     /** Master switch. Off by default: this is opt-in. */
-    public static final String ENABLED_KEY = "table.exec.gpu-offload.enabled";
+    public static final String ENABLED_KEY = "table.exec.accelerator.enabled";
 
     /**
      * Outcome of the gate. {@code reason} is always populated, including when eligible, so that

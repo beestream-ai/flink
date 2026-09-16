@@ -21,7 +21,7 @@ package org.apache.flink.table.planner.plan.accelerator;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
-import org.apache.flink.table.planner.plan.gpu.GpuOffloadOptions;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 
@@ -180,7 +180,7 @@ class DifferentialExpressionIT {
         sql.append(" FROM t WHERE ").append(generator.condition());
         String query = sql.toString();
 
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, false);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, false);
         final List<Row> onCpu;
         try {
             onCpu = run(query);
@@ -188,7 +188,7 @@ class DifferentialExpressionIT {
             throw new UnplannableQuery(query, plannerLimitation);
         }
 
-        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
         TestAcceleratorProvider.enable(10.0);
         if (corrupt) {
             TestAcceleratorProvider.corruptArithmetic();
