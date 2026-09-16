@@ -84,7 +84,13 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
         PLANS_OFFERED.set(0);
     }
 
+    /** Makes the accelerated operator fail in {@code open()}, as a lost device would. */
+    public static void failOnOpen() {
+        AccelInterpreterOperator.failOnOpen = true;
+    }
+
     public static void reset() {
+        AccelInterpreterOperator.failOnOpen = false;
         enabled = false;
         speedup = 10.0;
         AccelInterpreter.corrupt = false;

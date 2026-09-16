@@ -117,8 +117,21 @@ final class AccelInterpreterOperator extends AbstractStreamOperator<RowData>
         }
     }
 
+    /**
+     * Makes {@code open()} throw, standing in for a device that has gone away since the task was
+     * deployed.
+     *
+     * <p>{@code open()} is where a real provider compiles its kernel and allocates device buffers,
+     * and the task calls it after the factory has returned — so it is the window M3.4 covers, and
+     * the one where nothing has been consumed yet.
+     */
+    public static volatile boolean failOnOpen = false;
+
     @Override
     public void open() throws Exception {
+        if (failOnOpen) {
+            throw new IllegalStateException("simulated device failure during open()");
+        }
         super.open();
         projections = AccelInterpreter.projectionsOf(subtree);
         condition = AccelInterpreter.conditionOf(subtree);

@@ -297,6 +297,36 @@ class AcceleratorPathIT {
                 .contains("claims");
     }
 
+    /**
+     * A device that fails while the task is starting does not take the job down.
+     *
+     * <p>{@code open()} is what compiles a kernel and allocates device buffers, and the task calls
+     * it <em>after</em> the factory has returned — so until M3.4 a device that was reachable at
+     * deployment and gone by then was fatal, with a perfectly good code-generated operator sitting
+     * in the JobGraph.
+     *
+     * <p>What is asserted is the rows, not merely that the job survived: falling back is only worth
+     * anything if the answer is the one the CPU would have given.
+     */
+    @Test
+    @DisplayName(
+            "a device failing in open() finishes on the generated operator, with the same rows")
+    void deviceFailingAtOpenFallsBack() {
+        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        TestAcceleratorProvider.enable(10.0);
+        TestAcceleratorProvider.failOnOpen();
+
+        List<Row> afterFallback = run(QUERY);
+
+        TestAcceleratorProvider.reset();
+        List<Row> onCpu = run(QUERY);
+
+        assertThat(afterFallback)
+                .as("the fallback is only worth having if the rows are the CPU's")
+                .containsExactlyInAnyOrderElementsOf(onCpu);
+        assertThat(afterFallback).isNotEmpty();
+    }
+
     @Test
     @DisplayName("a provider claiming to be slower is refused, and the CPU runs instead")
     void slowProviderIsRefused() {

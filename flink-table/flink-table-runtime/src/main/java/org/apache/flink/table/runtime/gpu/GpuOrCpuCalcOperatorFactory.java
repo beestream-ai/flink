@@ -27,6 +27,7 @@ import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
@@ -142,9 +143,20 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
                         ((ProcessingTimeServiceAware) built)
                                 .setProcessingTimeService(processingTimeService);
                     }
-                    T operator = built.createStreamOperator(parameters);
+                    StreamOperator<RowData> device = built.createStreamOperator(parameters);
                     LOG.info("Accelerated on this TaskManager: {}", outcome.reason());
-                    return report(operator, true, outcome.reason());
+                    // Wrapped so that a device which fails while the task is starting -- open() is
+                    // what compiles the kernel and allocates its buffers, and the task calls it
+                    // after this method has returned -- finishes on the operator already in the
+                    // JobGraph rather than taking the job down. M3.4.
+                    FallbackToCpuOperator guarded =
+                            FallbackToCpuOperator.around(
+                                    (OneInputStreamOperator<RowData, RowData>) device,
+                                    cpuFactory,
+                                    parameters);
+                    @SuppressWarnings("unchecked")
+                    T operator = (T) guarded;
+                    return report(operator, guarded, outcome.reason());
                 }
                 return codeGenerated(parameters, outcome.reason());
             }
@@ -275,7 +287,7 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
         LOG.info(
                 "Accelerator declined on this TaskManager, running the generated CPU operator: {}",
                 reason);
-        return report(cpuFactory.createStreamOperator(parameters), false, reason);
+        return report(cpuFactory.createStreamOperator(parameters), null, reason);
     }
 
     /**
@@ -297,10 +309,15 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
      * line on the machine that made it.
      */
     private static <T extends StreamOperator<RowData>> T report(
-            T operator, boolean accelerated, String reason) {
+            T operator, @Nullable FallbackToCpuOperator guarded, String reason) {
         try {
             OperatorMetricGroup metrics = operator.getMetricGroup();
-            metrics.gauge(ACCELERATED, (Gauge<Integer>) () -> accelerated ? 1 : 0);
+            // Read through the guard rather than captured: a subtask that started on a device and
+            // fell back mid-task must stop claiming to be accelerated, and a gauge is read when it
+            // is reported rather than when it is registered.
+            metrics.gauge(
+                    ACCELERATED,
+                    (Gauge<Integer>) () -> guarded != null && guarded.isAccelerated() ? 1 : 0);
             metrics.gauge(DECISION, (Gauge<String>) () -> reason);
         } catch (Throwable t) {
             // A metric is never worth failing a task for, and a harness may hand back an operator
