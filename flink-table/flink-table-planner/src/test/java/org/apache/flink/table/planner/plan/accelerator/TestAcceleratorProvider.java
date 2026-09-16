@@ -63,6 +63,19 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
     /** Times {@link #accept} returned a plan. */
     public static final AtomicInteger PLANS_OFFERED = new AtomicInteger();
 
+    /**
+     * The batch size the last operator was told it could use, and whether the memory behind it was
+     * Flink's.
+     *
+     * <p>Both are what a provider is handed rather than what it asks for, which is the point: since
+     * M3.1 the configured batch size is a ceiling and the slot's managed budget decides the rest.
+     * Recording them here is the only way a test can see that from the outside.
+     */
+    public static final AtomicInteger LAST_MAX_BATCH_SIZE = new AtomicInteger(-1);
+
+    public static final java.util.concurrent.atomic.AtomicBoolean LAST_HAD_MANAGED_MEMORY =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     /** Accept subtrees on this thread, claiming {@code speedup} over the CPU. */
     public static void enable(double claimedSpeedup) {
         enabled = true;
@@ -107,6 +120,8 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
     @Override
     public StreamOperatorFactory<RowData> createOperator(
             AcceleratorPlan plan, AcceleratorContext context) {
+        LAST_MAX_BATCH_SIZE.set(context.maxBatchSize());
+        LAST_HAD_MANAGED_MEMORY.set(context.providesOffHeap());
         return SimpleOperatorFactory.of(
                 new AccelInterpreterOperator(
                         (AccelNode) plan.payload(), context.outputType(), ROWS_PROCESSED));

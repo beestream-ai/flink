@@ -20,6 +20,9 @@ package org.apache.flink.table.runtime.gpu;
 
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.core.memory.ManagedMemoryUseCase;
+import org.apache.flink.runtime.execution.Environment;
+import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.StreamOperator;
@@ -33,11 +36,15 @@ import org.apache.flink.table.runtime.accelerator.AcceleratorChoice;
 import org.apache.flink.table.runtime.accelerator.AcceleratorContext;
 import org.apache.flink.table.runtime.accelerator.AcceleratorProvider;
 import org.apache.flink.table.runtime.accelerator.AcceleratorProviders;
+import org.apache.flink.table.runtime.accelerator.ManagedOffHeapArena;
 import org.apache.flink.table.types.logical.RowType;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
+
+import java.nio.ByteBuffer;
 import java.util.Optional;
 
 /**
@@ -125,7 +132,9 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
                     StreamOperatorFactory<RowData> built =
                             accelerator
                                     .get()
-                                    .createOperator(outcome.plan().get(), contextFor(spec, loader));
+                                    .createOperator(
+                                            outcome.plan().get(),
+                                            contextFor(spec, loader, parameters));
                     built.setChainingStrategy(getChainingStrategy());
                     if (built instanceof ProcessingTimeServiceAware) {
                         ((ProcessingTimeServiceAware) built)
@@ -146,7 +155,28 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
         }
     }
 
-    private static AcceleratorContext contextFor(AcceleratedCalcSpec spec, ClassLoader loader) {
+    /**
+     * What this machine tells the provider about the task it is being built into.
+     *
+     * <p>The batch size is the part worth reading. Until M3.1 it was whatever {@code
+     * table.exec.gpu-offload.batch-size} said, which is a number chosen once, in a config file, by
+     * someone who could not know how much memory the slot running this task would have or how wide
+     * its rows would be. It is now a <em>ceiling</em>: the operator asks the slot what it has,
+     * works out how many rows of this width fit, and takes the smaller of the two.
+     *
+     * <p>Where there is no budget — a plan built before the transformation declared managed memory,
+     * or a test harness with no slot behind it — the configured value stands and the provider
+     * allocates privately. That is what happened before, and it is a safe degradation rather than a
+     * failure.
+     */
+    private static AcceleratorContext contextFor(
+            AcceleratedCalcSpec spec,
+            ClassLoader loader,
+            StreamOperatorParameters<RowData> parameters) {
+
+        final ManagedOffHeapArena arena = reserveStagingMemory(spec, parameters);
+        final int batchSize = batchSizeFor(spec, arena);
+
         return new AcceleratorContext() {
             @Override
             public RowType outputType() {
@@ -155,14 +185,87 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
 
             @Override
             public int maxBatchSize() {
-                return spec.maxBatchSize();
+                return batchSize;
             }
 
             @Override
             public ClassLoader userCodeClassLoader() {
                 return loader;
             }
+
+            @Override
+            public boolean providesOffHeap() {
+                return arena != null;
+            }
+
+            @Override
+            public ByteBuffer allocateOffHeap(int bytes) {
+                if (arena == null) {
+                    throw new IllegalStateException(
+                            "no managed memory was reserved for this operator, so the provider"
+                                    + " must allocate its own staging");
+                }
+                return arena.allocate(bytes);
+            }
         };
+    }
+
+    /**
+     * Reserves the slot's share of managed memory for this operator, or null if there is none.
+     *
+     * <p>Registered with the task's cancelables rather than closed by the operator: a cancelled
+     * task must give its memory back, and an operator cancelled before {@code close} would
+     * otherwise hold it for the life of the slot.
+     */
+    private static @Nullable ManagedOffHeapArena reserveStagingMemory(
+            AcceleratedCalcSpec spec, StreamOperatorParameters<RowData> parameters) {
+        try {
+            Environment environment = parameters.getContainingTask().getEnvironment();
+            MemoryManager memoryManager = environment.getMemoryManager();
+            double fraction =
+                    parameters
+                            .getStreamConfig()
+                            .getManagedMemoryFractionOperatorUseCaseOfSlot(
+                                    ManagedMemoryUseCase.OPERATOR,
+                                    environment.getJobConfiguration(),
+                                    environment.getTaskManagerInfo().getConfiguration(),
+                                    environment.getUserCodeClassLoader().asClassLoader());
+            long budget = memoryManager.computeMemorySize(fraction);
+
+            Optional<ManagedOffHeapArena> arena =
+                    ManagedOffHeapArena.reserve(memoryManager, spec, budget);
+            if (!arena.isPresent()) {
+                LOG.info(
+                        "No managed memory for accelerated staging (budget {} bytes); the provider"
+                                + " allocates its own and the configured batch size stands",
+                        budget);
+                return null;
+            }
+            parameters.getContainingTask().getCancelables().registerCloseable(arena.get());
+            return arena.get();
+        } catch (Throwable t) {
+            // Reserving improves the accounting; it is never a precondition for running.
+            LOG.info("Could not reserve managed memory for accelerated staging ({})", t.toString());
+            return null;
+        }
+    }
+
+    /** The configured ceiling, or what the reserved budget actually fits, whichever is smaller. */
+    private static int batchSizeFor(AcceleratedCalcSpec spec, @Nullable ManagedOffHeapArena arena) {
+        if (arena == null) {
+            return spec.maxBatchSize();
+        }
+        int bytesPerRow =
+                Math.max(1, spec.work().inputBytesPerRow() + spec.work().outputBytesPerRow());
+        long fits = arena.reservedBytes() / bytesPerRow;
+        int batchSize = (int) Math.max(1, Math.min(spec.maxBatchSize(), fits));
+        LOG.info(
+                "Accelerated staging: {} bytes reserved, {} a row, batch size {} (ceiling {})",
+                arena.reservedBytes(),
+                bytesPerRow,
+                batchSize,
+                spec.maxBatchSize());
+        return batchSize;
     }
 
     private <T extends StreamOperator<RowData>> T codeGenerated(

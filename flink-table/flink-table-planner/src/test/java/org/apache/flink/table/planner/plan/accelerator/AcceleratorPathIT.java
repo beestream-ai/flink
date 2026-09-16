@@ -238,6 +238,37 @@ class AcceleratorPathIT {
                 .containsExactlyInAnyOrderElementsOf(run(FLOAT_QUERY));
     }
 
+    /**
+     * The slot's managed memory decides the batch size; the configured value is only a ceiling.
+     *
+     * <p>Before M3.1 the provider was told whatever {@code table.exec.gpu-offload.batch-size} said
+     * — a number chosen once, in a config file, by someone who could not know how much memory the
+     * slot running the task would have or how wide its rows would be. The staging it sized was
+     * invisible to Flink besides.
+     *
+     * <p>Asserted from the provider's side because that is the only place it shows. The default
+     * ceiling is 262,144 rows; a MiniCluster slot's share of managed memory does not stretch to
+     * that many rows of this width, so the number the provider is handed must be smaller.
+     */
+    @Test
+    @DisplayName("the batch size comes from the slot's budget, not from the configured ceiling")
+    void batchSizeComesFromTheSlotBudget() {
+        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        TestAcceleratorProvider.enable(10.0);
+
+        run(QUERY);
+
+        assertThat(TestAcceleratorProvider.LAST_HAD_MANAGED_MEMORY.get())
+                .as(
+                        "the transformation must declare managed memory, or there is no budget to size"
+                                + " a batch from")
+                .isTrue();
+        assertThat(TestAcceleratorProvider.LAST_MAX_BATCH_SIZE.get())
+                .as("the provider must be handed the slot's answer, not the config's")
+                .isPositive()
+                .isLessThan(tEnv.getConfig().get(GpuOffloadOptions.BATCH_SIZE));
+    }
+
     @Test
     @DisplayName("a provider claiming to be slower is refused, and the CPU runs instead")
     void slowProviderIsRefused() {

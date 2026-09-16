@@ -44,6 +44,7 @@ import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeContext;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeMetadata;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.common.CommonExecCalc;
+import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.planner.utils.JavaScalaConversionUtil;
 import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
 import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
@@ -181,9 +182,40 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
         if (transform instanceof OneInputTransformation
                 && ((OneInputTransformation<?, ?>) transform).getOperatorFactory()
                         instanceof GpuOrCpuCalcOperatorFactory) {
+            declareStagingMemory(config, transform);
             requestDeviceIfConfigured(planner, config, transform);
         }
         return transform;
+    }
+
+    /**
+     * Declares how much managed memory an accelerated Calc wants for staging.
+     *
+     * <p>A weight, not an allocation. Flink divides the slot's managed memory between the operators
+     * that asked for it in proportion to what they asked, so this decides a share; the runtime
+     * turns that share into bytes and the batch size follows from the bytes. What the client can
+     * contribute is the shape of the work — how wide a row is, and how many rows the configuration
+     * is willing to stage — and that is exactly what it declares here.
+     *
+     * <p>Before this, the staging was invisible to Flink: the provider allocated off-heap for
+     * itself, the slot's budget knew nothing about it, and the only way to make a cluster survive
+     * was to hand-configure {@code taskmanager.memory.task.off-heap.size} per deployment. An
+     * operator that declares nothing gets nothing, and the runtime falls back to allocating
+     * privately, so a plan compiled before this existed still runs.
+     */
+    private void declareStagingMemory(ExecNodeConfig config, Transformation<RowData> transform) {
+        GpuOffloadAssignment assignment = getGpuOffloadAssignment();
+        if (assignment == null || !assignment.isOffloaded()) {
+            return;
+        }
+        int bytesPerRow =
+                assignment.verdict().work().inputBytesPerRow()
+                        + assignment.verdict().work().outputBytesPerRow();
+        if (bytesPerRow <= 0) {
+            return;
+        }
+        long wanted = (long) bytesPerRow * config.get(GpuOffloadOptions.BATCH_SIZE);
+        ExecNodeUtil.setManagedMemoryWeight(transform, wanted);
     }
 
     /**

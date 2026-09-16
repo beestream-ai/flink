@@ -21,6 +21,8 @@ package org.apache.flink.table.runtime.accelerator;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.table.types.logical.RowType;
 
+import java.nio.ByteBuffer;
+
 /**
  * What a provider is told about the task it is being asked to run in.
  *
@@ -45,4 +47,40 @@ public interface AcceleratorContext {
 
     /** The loader that supplied the provider, for anything it must load reflectively. */
     ClassLoader userCodeClassLoader();
+
+    /**
+     * Whether {@link #allocateOffHeap} will work here.
+     *
+     * <p>False is ordinary: a plan compiled before Flink declared managed memory for this operator,
+     * a slot too short to reserve any, a test harness with no slot behind it at all. A provider
+     * that sees false should allocate for itself, exactly as it did before this existed.
+     *
+     * <p>Asking is the point. The alternative is a speculative allocation to see whether one works,
+     * which spends budget to learn something the caller could simply have been told.
+     */
+    boolean providesOffHeap();
+
+    /**
+     * Off-heap memory for staging, from the slot's managed budget.
+     *
+     * <p>A provider should stage through this rather than allocating for itself, and the reason is
+     * accounting rather than convenience. Memory a provider allocates privately is invisible to
+     * Flink: the slot's budget does not know about it, two accelerated operators sharing a slot
+     * each believe they have the whole machine, and the only way to make a cluster survive was to
+     * hand-configure an off-heap figure per deployment. Memory taken from here is reserved against
+     * the managed budget the transformation declared, counted against the slot, and released when
+     * the task finishes whether it succeeds, fails or is cancelled.
+     *
+     * <p>Returned as a {@link ByteBuffer} because that is the widest currency available. It is
+     * direct and its address is stable, so a provider can hand it to whatever its own runtime wants
+     * — a {@code java.lang.foreign.MemorySegment}, a JNI pointer, a device mapping. Flink
+     * deliberately names none of those: it is compiled for a language level where some of them are
+     * preview features, and an SPI that named one would exclude the providers that use another.
+     *
+     * <p>The buffer is zeroed. Do not free it; do not use it after the operator closes.
+     *
+     * @param bytes how many bytes, which must not exceed what {@link #maxBatchSize} implies
+     * @throws IllegalStateException if the budget cannot cover the request
+     */
+    ByteBuffer allocateOffHeap(int bytes);
 }
