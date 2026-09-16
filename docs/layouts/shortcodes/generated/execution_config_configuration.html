@@ -58,9 +58,9 @@
         </tr>
         <tr>
             <td><h5>table.exec.accelerator.fuse-aggregate</h5><br> <span class="label label-primary">Batch</span></td>
-            <td style="word-wrap: break-word;">true</td>
+            <td style="word-wrap: break-word;">false</td>
             <td>Boolean</td>
-            <td>If true, an ungrouped SUM over an offloaded Calc runs as one device pass with the projection, so the intermediate never returns to the host. Turn off to measure what that is worth.</td>
+            <td>If true, an ungrouped SUM over an offloaded Calc is fused with it into one operator. Off by default: the fused pair has no accelerator implementation yet, so fusing it takes away the projection&#x27;s own accelerator path and gives back only what operator chaining already did. Turn on to measure fusion, or once a fused pair can run on a device.</td>
         </tr>
         <tr>
             <td><h5>table.exec.accelerator.min-speedup</h5><br> <span class="label label-primary">Batch</span></td>

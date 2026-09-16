@@ -25,6 +25,7 @@ import org.apache.flink.streaming.api.graph.StreamGraph;
 import org.apache.flink.streaming.api.graph.StreamNode;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
+import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
 import org.apache.flink.types.Row;
 
 import org.junit.jupiter.api.DisplayName;
@@ -154,6 +155,49 @@ class GpuFusionRewriteIT {
                 .contains("Calc", "LocalHashAggregate")
                 .doesNotContain("AcceleratedGroup");
         assertThat(tableStreamNodes(exec.getStreamGraph())).hasSameSizeAs(planned);
+    }
+
+    /**
+     * On default settings the projection keeps its own accelerator path. M4.5.
+     *
+     * <p>This is the assertion the old default made false. Fusion removes the {@code Calc}'s {@code
+     * GpuOrCpuCalcOperatorFactory} — the fused pair has no accelerator implementation to replace it
+     * with — so while {@code fuse-aggregate} defaulted to true, the shape the whole fusion
+     * machinery exists for was the one shape that could not offload at all. Nothing caught it: the
+     * accelerator suites use plain projections, and the fusion suites assert what the processor
+     * grouped, which is the same either way.
+     */
+    @Test
+    @DisplayName("on default settings SELECT SUM(heavy) keeps its accelerator path")
+    void theDefaultKeepsTheAcceleratorPath() {
+        StreamExecutionEnvironment exec = StreamExecutionEnvironment.createLocalEnvironment();
+        exec.setRuntimeMode(RuntimeExecutionMode.BATCH);
+        exec.setParallelism(1);
+        StreamTableEnvironment tEnv = StreamTableEnvironment.create(exec);
+        tEnv.executeSql(
+                "CREATE TABLE t (id BIGINT NOT NULL, val DOUBLE NOT NULL) WITH ("
+                        + "'connector' = 'datagen', 'number-of-rows' = '100')");
+        // Only the feature flag. Whether fusion happens must follow from the option's default.
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+
+        assertThat(
+                        tEnv.getConfig()
+                                .get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_FUSE_AGGREGATE))
+                .as("this test is about the default, so it must not be set here")
+                .isFalse();
+
+        tEnv.toDataStream(tEnv.sqlQuery(QUERY), Row.class).sinkTo(new DiscardingSink<>());
+        StreamGraph graph = exec.getStreamGraph();
+
+        boolean calcCanOffload = false;
+        for (StreamNode node : graph.getStreamNodes()) {
+            if (node.getOperatorFactory() instanceof GpuOrCpuCalcOperatorFactory) {
+                calcCanOffload = true;
+            }
+        }
+        assertThat(calcCanOffload)
+                .as("the projection must still carry both implementations into the JobGraph")
+                .isTrue();
     }
 
     /**

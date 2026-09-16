@@ -1286,16 +1286,28 @@ public class ExecutionConfigOptions {
      * <p>It is switchable because the two paths are otherwise impossible to compare. Both arms have
      * to run in one session -- this project's own numbers moved 6% between sittings -- and without
      * a switch the unfused path is unreachable once the planner has learned to fuse.
+     *
+     * <p><b>Default false since M4.5.</b> M4.0 measured both halves of the question on an RTX 5070
+     * Ti. Fusing the two <em>CPU</em> operators is worth nothing -- 0.6%, with overlapping ranges
+     * -- because Flink's own operator chaining already does it. Fusing them on a <em>device</em> is
+     * worth 1.06x to 4.53x, because the intermediate stops crossing the bus. M1.1 removed the
+     * device route and nothing has restored it, so today the only thing fusion does is replace the
+     * projection's {@code GpuOrCpuCalcOperatorFactory} with a chained CPU pair -- which is to say
+     * it stops {@code SELECT SUM(heavy) FROM t} from offloading at all. The default follows the
+     * measurement; flip it back when a fused pair can run on a device.
      */
     @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
     public static final ConfigOption<Boolean> TABLE_EXEC_ACCELERATOR_FUSE_AGGREGATE =
             ConfigOptions.key("table.exec.accelerator.fuse-aggregate")
                     .booleanType()
-                    .defaultValue(true)
+                    .defaultValue(false)
                     .withDescription(
-                            "If true, an ungrouped SUM over an offloaded Calc runs as one device "
-                                    + "pass with the projection, so the intermediate never returns "
-                                    + "to the host. Turn off to measure what that is worth.");
+                            "If true, an ungrouped SUM over an offloaded Calc is fused with it "
+                                    + "into one operator. Off by default: the fused pair has no "
+                                    + "accelerator implementation yet, so fusing it takes away the "
+                                    + "projection's own accelerator path and gives back only what "
+                                    + "operator chaining already did. Turn on to measure fusion, "
+                                    + "or once a fused pair can run on a device.");
 
     /**
      * How much faster than the CPU a provider must claim to be before Flink prefers it.
