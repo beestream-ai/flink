@@ -25,6 +25,7 @@ import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.api.transformations.OneInputTransformation;
+import org.apache.flink.streaming.api.transformations.PartitionTransformation;
 import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
@@ -61,10 +62,14 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /** Batch {@link ExecNode} for Calc. */
 @ExecNodeMetadata(
@@ -265,10 +270,10 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
         if (ExecutionConfigOptions.DEFAULT_SLOT_SHARING_GROUP_NAME.equals(groupName)) {
             throw new IllegalArgumentException(
                     ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_SLOT_SHARING_GROUP.key()
-                            + " cannot be \"default\". Flink resolves a vertex in the default "
-                            + "group to its region's slot sharing group and never reads the "
-                            + "resources registered under that name, so the requirement would be "
-                            + "silently dropped rather than merely weakened. Name a group.");
+                            + " cannot be \"default\". Resources registered under that name are "
+                            + "applied to every pipelined region in the job, not only the one "
+                            + "holding the accelerated node, so every region would demand a "
+                            + "device. Name a group, and this node's region is put in it.");
         }
         final SlotSharingGroup group =
                 SlotSharingGroup.newBuilder(groupName)
@@ -287,11 +292,18 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
                                                 .TABLE_EXEC_ACCELERATOR_DEVICE_RESOURCE_AMOUNT))
                         .build();
 
-        // Registering carries the resources; setting the group on the transformation is what puts
-        // this operator in it. The default group name is the one every other operator already
-        // uses, so by default this requirement covers the pipelined region and no chain is broken.
+        // Registering carries the resources; putting the region in the group is what makes them
+        // apply to it. M6.1: the region, not the node alone -- see placeRegionIn.
+        // Registered on the environment and, separately, carried on every transformation in the
+        // region. The second is not redundant. Setting a group by name alone leaves the resources
+        // to the environment-level registration, and whether that reaches the StreamGraph the
+        // planner's transformations end up in depends on which environment object the job was
+        // built from: with a freshly created one the profile arrives UNKNOWN and the requirement
+        // is silently dropped, which is a job that looks configured for a device and asks for
+        // nothing. Carrying the group object puts the spec on the transformation itself, where
+        // StreamGraphGenerator reads it either way. Pinned by GpuPlacementChainingIT.
         planner.getExecEnv().registerSlotSharingGroup(group);
-        transform.setSlotSharingGroup(group);
+        placeRegionIn(transform, group);
         // At INFO in the client, because a plan saying GPU is an intention and this is the one
         // thing the client can report as fact: that it asked. Whether a device was used is settled
         // on the TaskManager and reported there.
@@ -386,6 +398,63 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
     static final String COMPILED_PLAN_REASON =
             "compiled plan: the offload decision is not part of the plan format, so a restored "
                     + "plan cannot reproduce it and every compiled plan runs on the CPU";
+
+    /**
+     * Puts this node's pipelined region into the device's slot sharing group, not just this node.
+     *
+     * <p>This is M6.1, and the whole of it. Setting the group on the accelerated operator alone is
+     * what the placement did before, and it has a cost that is not obvious from reading it: Flink
+     * chains two operators only when their slot sharing groups match, so moving one node into a
+     * named group unchains it from its input. M6.0 measured that at roughly a fifth of job wall
+     * clock at 4M rows on a machine with no spare cores, growing linearly with the width of the row
+     * crossing the boundary -- paid by a feature whose entire purpose is to be faster.
+     *
+     * <p>Walking up and setting the same group on the operators above puts the boundary back where
+     * it already was. The walk stops at a {@link PartitionTransformation}, which is what an
+     * exchange translates to and therefore where the pipelined region ends: the chain breaks there
+     * whatever we do, and going further would enlarge the requirement to regions that have no
+     * accelerated node in them.
+     *
+     * <p>Three other things stop it, each because continuing would claim something untrue:
+     *
+     * <ul>
+     *   <li>a transformation already in a named group, which belongs to whoever named it;
+     *   <li>a transformation with more than one input, since the requirement would spread across a
+     *       join into a branch that does not need a device;
+     *   <li>a transformation already visited, so a diamond cannot make this loop.
+     * </ul>
+     *
+     * <p>What it deliberately does <em>not</em> do is use the default group name. Resources
+     * registered under that name are applied to every region in the job rather than to this one,
+     * which is why {@code requestDeviceIfConfigured} refuses it.
+     */
+    private static void placeRegionIn(Transformation<?> start, SlotSharingGroup group) {
+        final Set<Transformation<?>> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        final Deque<Transformation<?>> pending = new ArrayDeque<>();
+        pending.push(start);
+        while (!pending.isEmpty()) {
+            Transformation<?> current = pending.pop();
+            if (!seen.add(current)) {
+                continue;
+            }
+            current.setSlotSharingGroup(group);
+            for (Transformation<?> input : current.getInputs()) {
+                if (input instanceof PartitionTransformation) {
+                    // The region ends here: an exchange breaks the chain on its own.
+                    continue;
+                }
+                if (input.getInputs().size() > 1) {
+                    continue;
+                }
+                if (input.getSlotSharingGroup().isPresent()
+                        && !ExecutionConfigOptions.DEFAULT_SLOT_SHARING_GROUP_NAME.equals(
+                                input.getSlotSharingGroup().get().getName())) {
+                    continue;
+                }
+                pending.push(input);
+            }
+        }
+    }
 
     /** Rewrites the node's verdict so EXPLAIN reports why a selected node still ran on the CPU. */
     private void recordGpuFallback(GpuOffloadAssignment assignment, String reason) {

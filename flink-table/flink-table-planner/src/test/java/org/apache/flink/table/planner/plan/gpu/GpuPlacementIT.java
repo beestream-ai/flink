@@ -102,14 +102,20 @@ class GpuPlacementIT {
     }
 
     /**
-     * The one name that would not break the chain is the one Flink ignores.
+     * The default name is refused because it is too broad, not because it is ignored.
      *
-     * <p>A vertex in the default group resolves to its region's slot sharing group, and the
-     * resources registered under the default name are never read. Accepting the setting would
-     * produce a job that looks configured for a device and asks for nothing.
+     * <p>Since M6.1 the accelerated node keeps its chain by having its whole pipelined region put
+     * into the named group, so "the default group would not break the chain" is no longer a reason
+     * to want it. What is left is the reason to refuse it: {@code
+     * StreamingJobGraphGenerator.buildVertexRegionSlotSharingGroups} applies the resources
+     * registered under the default name to <em>every</em> region in the job, so a job with a
+     * device-free branch would demand a device for that branch too.
+     *
+     * <p>The earlier rationale here — that Flink never reads resources registered under the default
+     * name — was wrong, and the message said so to users.
      */
     @Test
-    @DisplayName("the default slot sharing group is refused rather than silently ignored")
+    @DisplayName("the default slot sharing group is refused for being too broad")
     void refusesTheDefaultGroup() {
         requireDevice();
         tEnv.getConfig()
@@ -118,7 +124,9 @@ class GpuPlacementIT {
                         "default");
         IllegalArgumentException thrown =
                 assertThrows(IllegalArgumentException.class, () -> tEnv.explainSql(HEAVY));
-        assertTrue(thrown.getMessage().contains("silently dropped"), thrown.getMessage());
+        assertTrue(
+                thrown.getMessage().contains("every pipelined region in the job"),
+                thrown.getMessage());
     }
 
     /** A node that was never selected must not drag a device requirement onto the job. */
