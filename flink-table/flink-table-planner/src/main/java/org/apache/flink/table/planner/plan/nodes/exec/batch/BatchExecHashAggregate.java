@@ -271,6 +271,14 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         if (mine == null || !mine.isOffloaded()) {
             return null;
         }
+        if (config.isCompiled()) {
+            // M4.4. Fusion is driven by the same transient assignment the Calc's device route is,
+            // so a restored plan would fuse nothing while the in-memory CompiledPlan it was
+            // written from would fuse. A compiled plan that translates into different operators
+            // depending on whether it has been through a file is not a compiled plan.
+            recordFallback(BatchExecCalc.COMPILED_PLAN_REASON);
+            return null;
+        }
         ExecNode<?> input = getInputEdges().get(0).getSource();
         if (!(input instanceof CommonExecCalc)) {
             return null;

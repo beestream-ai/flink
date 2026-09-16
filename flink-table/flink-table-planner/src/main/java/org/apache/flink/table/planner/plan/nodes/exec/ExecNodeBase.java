@@ -317,7 +317,16 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
         this.estimatedRowCount = rowCount;
     }
 
+    /**
+     * Planner-side scratch, never part of the plan format.
+     *
+     * <p>{@code transient} is not enough: Jackson serialises properties by accessor, not by field,
+     * so without this the row count and the offload assignment below were both written into a
+     * compiled plan's JSON — and {@link GpuOffloadAssignment} has no creator, so the plan could not
+     * be read back at all. M4.4.
+     */
     @Override
+    @JsonIgnore
     public double getEstimatedRowCount() {
         return estimatedRowCount;
     }
@@ -327,7 +336,9 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
         this.gpuOffloadAssignment = assignment;
     }
 
+    /** Planner-side scratch; see {@link #getEstimatedRowCount()}. */
     @Override
+    @JsonIgnore
     public @Nullable GpuOffloadAssignment getGpuOffloadAssignment() {
         return gpuOffloadAssignment;
     }

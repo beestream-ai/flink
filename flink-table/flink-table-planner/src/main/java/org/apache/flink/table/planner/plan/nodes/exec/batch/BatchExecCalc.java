@@ -328,6 +328,21 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
      * client, and the task will run wherever the scheduler puts it; asking the client's classpath
      * about the cluster's hardware was the bug this shape removes. Both implementations therefore
      * travel in the JobGraph and {@link GpuOrCpuCalcOperatorFactory} chooses on arrival.
+     *
+     * <p><b>Compiled plans never offload</b> (M4.4). The decision this method consults is a {@code
+     * GpuOffloadAssignment} the offload processor hung on the node, and that field is transient and
+     * absent from the node's JSON: a plan written to a file and read back has no assignment and
+     * would silently run on the CPU, while the same {@code CompiledPlan} held in memory still
+     * carries one and would offload. A compiled plan exists precisely so that the operators do not
+     * change out from under a running job, so the two must agree, and the way to make them agree is
+     * to refuse both.
+     *
+     * <p>Serialising the assignment instead was the alternative, and it buys less than it costs. It
+     * would pin the accelerator IR, the work profile and the cost model into a format Flink
+     * undertakes to keep restorable across releases, and it still would not reproduce the original
+     * verdict: whether a subtree actually runs on a device is settled per subtask on the
+     * TaskManager, against whatever provider and hardware it finds. The plan can only record that
+     * the node was <em>eligible</em>, which is not the thing a restored plan would be reproducing.
      */
     @Override
     protected StreamOperatorFactory<RowData> substituteOperator(
@@ -337,6 +352,10 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
         RowType outputType = (RowType) getOutputType();
         GpuOffloadAssignment assignment = getGpuOffloadAssignment();
         if (assignment == null || !assignment.isOffloaded()) {
+            return codeGenerated;
+        }
+        if (config.isCompiled()) {
+            recordGpuFallback(assignment, COMPILED_PLAN_REASON);
             return codeGenerated;
         }
         RowType inputType = (RowType) getInputEdges().get(0).getOutputType();
@@ -357,6 +376,16 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
                                 .get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
         return new GpuOrCpuCalcOperatorFactory(spec, codeGenerated);
     }
+
+    /**
+     * Why a node selected for offload runs on the CPU anyway inside a compiled plan.
+     *
+     * <p>Shared with {@link BatchExecHashAggregate} so that the two halves of a fused subtree give
+     * the same account of themselves.
+     */
+    static final String COMPILED_PLAN_REASON =
+            "compiled plan: the offload decision is not part of the plan format, so a restored "
+                    + "plan cannot reproduce it and every compiled plan runs on the CPU";
 
     /** Rewrites the node's verdict so EXPLAIN reports why a selected node still ran on the CPU. */
     private void recordGpuFallback(GpuOffloadAssignment assignment, String reason) {
