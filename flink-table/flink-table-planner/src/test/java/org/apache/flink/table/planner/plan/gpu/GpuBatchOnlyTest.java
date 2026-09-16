@@ -18,15 +18,21 @@
 
 package org.apache.flink.table.planner.plan.gpu;
 
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecCalc;
 import org.apache.flink.table.planner.plan.nodes.exec.common.CommonExecCalc;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecCalc;
+import org.apache.flink.table.types.logical.DoubleType;
+import org.apache.flink.table.types.logical.RowType;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -80,6 +86,64 @@ class GpuBatchOnlyTest {
                                                         || name.toLowerCase().contains("device")))
                 .as("CommonExecCalc must not declare offload methods for StreamExecCalc to inherit")
                 .isEmpty();
+    }
+
+    /**
+     * The node that can offload is the one whose generated operator discards {@code RowKind}.
+     *
+     * <p>This is M2.7, and the pairing is the whole argument. {@code retainHeader} is what decides
+     * whether the code generator emits
+     *
+     * <pre>result.setRowKind(input.getRowKind());</pre>
+     *
+     * <p>and for a batch Calc it is {@code false}, so the operator Flink would have run emits an
+     * insert whatever came in. The accelerated operator builds a fresh {@code GenericRowData},
+     * which is an insert by default. Those are the same behaviour, so offloading a batch Calc
+     * cannot change a row's kind relative to not offloading it — there is nothing to preserve that
+     * was being preserved before.
+     *
+     * <p>The streaming Calc is {@code retainHeader = true} and would have a header to lose. It
+     * cannot reach the path, which is what the two tests above establish, and this is why that
+     * matters rather than being housekeeping: a {@code -U} becoming a {@code +I} is a changelog
+     * that no longer describes the same table.
+     */
+    @Test
+    @DisplayName("the batch node discards RowKind anyway, so offloading it changes nothing")
+    void theOffloadableNodeDoesNotRetainTheHeader() throws Exception {
+        assertThat(retainsHeader(batchCalc()))
+                .as(
+                        "a batch Calc must not retain the header, or the accelerated operator -- which"
+                                + " always emits an insert -- would differ from the one it replaces")
+                .isFalse();
+        assertThat(retainsHeader(streamCalc()))
+                .as("and the streaming Calc must, which is exactly why it must not offload")
+                .isTrue();
+    }
+
+    private static CommonExecCalc batchCalc() {
+        return new BatchExecCalc(
+                new Configuration(),
+                Collections.emptyList(),
+                null,
+                InputProperty.DEFAULT,
+                RowType.of(new DoubleType()),
+                "batch calc under test");
+    }
+
+    private static CommonExecCalc streamCalc() {
+        return new StreamExecCalc(
+                new Configuration(),
+                Collections.emptyList(),
+                null,
+                InputProperty.DEFAULT,
+                RowType.of(new DoubleType()),
+                "stream calc under test");
+    }
+
+    private static boolean retainsHeader(CommonExecCalc calc) throws Exception {
+        Field field = CommonExecCalc.class.getDeclaredField("retainHeader");
+        field.setAccessible(true);
+        return field.getBoolean(calc);
     }
 
     private static boolean declares(Class<?> type, String method) {
