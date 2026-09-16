@@ -151,6 +151,12 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
      * <p>Approximate by design: it charges each distinct referenced column once at its declared
      * width. What matters to a provider is the ratio of this to the operation counts — arithmetic
      * intensity — and that ratio is not sensitive to a byte here or there.
+     *
+     * <p>A nullable column costs one byte more (M2.9). Validity has to cross to the device with the
+     * values, and although a provider is free to pack it far tighter than a byte — a bit a column a
+     * row is the obvious encoding — charging something rather than nothing keeps the ratio honest
+     * for an expression over many nullable columns, which is the case where it stops being a
+     * rounding error.
      */
     private static int bytesPerRow(List<? extends RexNode> nodes) {
         java.util.Set<Integer> seen = new java.util.HashSet<>();
@@ -162,6 +168,9 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
                         public Void visitInputRef(RexInputRef ref) {
                             if (seen.add(ref.getIndex())) {
                                 bytes[0] += widthOf(ref.getType().getSqlTypeName());
+                                if (ref.getType().isNullable()) {
+                                    bytes[0] += 1;
+                                }
                             }
                             return null;
                         }
@@ -260,23 +269,20 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
             // CPU plan for large keys. Projecting such a column through is still fine: it never
             // reaches the device. Costing it here as eligible and having generation refuse it
             // later showed up in EXPLAIN as an unexplained fallback.
-            // A staged column crosses to the device as a bare primitive. There is no null
-            // representation in the buffer and no three-valued logic in the generated kernel, so a
-            // null would arrive as 0.0 -- which looks like data -- and be computed on.
+            // Nullable operands used to be refused here, and are not any more (M2.9).
             //
-            // What the refusal costs is more than it sounds: Calcite does not narrow nullability
-            // through a filter, so `SELECT f(x) FROM t WHERE x IS NOT NULL` still types x as
-            // nullable and is refused even though a null is impossible there. Conservative is the
-            // safe direction, and the reason names the fix rather than leaving the user guessing.
-            if (operand.getType().isNullable()) {
-                return RowCost.ineligible(
-                        "nullable operand of "
-                                + call.getOperator().getName()
-                                + " (type "
-                                + operand.getType()
-                                + "): a device kernel has no null representation, so declare the "
-                                + "column NOT NULL to make this expression offloadable");
-            }
+            // The refusal was correct while a kernel had no way to say "this value is not there",
+            // and it cost nearly everything: measured over Flink's own test DDLs, 95.4% of numeric
+            // columns are nullable, 93% of tables declare no NOT NULL numeric column at all, and
+            // nothing in a query rescues one -- not IS NOT NULL, not a predicate implying it, not
+            // a subquery -- because Calcite does not narrow a column's declared type through a
+            // filter. Only the DDL, which a query author reading a catalog table cannot change.
+            //
+            // The IR could always express this: outputType() is a Flink LogicalType and carries
+            // isNullable(). So the subtree now reaches the provider with the nullability intact and
+            // the provider decides. One that cannot represent a null declines in accept(), the
+            // code-generated operator runs, and the answer is the same as it was -- which is what
+            // makes relaxing this safe before any kernel can act on it.
             if (operand.getType().getSqlTypeName() == SqlTypeName.BIGINT) {
                 return RowCost.ineligible(
                         "BIGINT operand of "

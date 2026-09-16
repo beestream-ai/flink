@@ -210,18 +210,38 @@ class GpuCostEstimatorTest {
     }
 
     @Test
-    @DisplayName("a nullable expression input is refused, and the reason names NOT NULL")
-    void nullableInputIsRefused() {
-        // A staged column crosses as a bare primitive. BinaryRowData.setNullAt zeroes the slot, so
-        // a null would arrive at the kernel as 0.0 -- which looks like data and is computed on.
+    @DisplayName("a nullable operand is eligible; representing the null is the provider's problem")
+    void nullableInputIsEligible() {
+        // Refused until M2.9, on the grounds that a staged column crosses as a bare primitive and
+        // BinaryRowData.setNullAt zeroes the slot, so a null would reach the kernel as 0.0 and be
+        // computed on. True of one kernel generator, and it cost nearly everything: 95.4% of
+        // numeric columns in Flink's own test DDLs are nullable and no query construct rescues one.
+        //
+        // The IR always carried nullability -- LogicalType.isNullable() -- so the subtree now
+        // reaches the provider saying so, and a provider that cannot represent a missing value
+        // declines there instead.
         RexNode expr =
                 rex.makeCall(
                         SqlStdOperatorTable.MULTIPLY, nullableCol(SqlTypeName.DOUBLE, 0), lit(2.0));
 
         RowCost cost = GpuCostEstimator.estimate(expr);
 
-        assertFalse(cost.isEligible(), "a nullable operand has no device representation");
-        assertTrue(cost.rejection().contains("NOT NULL"), cost::rejection);
+        assertTrue(cost.isEligible(), cost::rejection);
+    }
+
+    @Test
+    @DisplayName("and it is charged for the validity it has to carry")
+    void nullableInputCostsAnExtraByte() {
+        RexNode nullable =
+                rex.makeCall(
+                        SqlStdOperatorTable.MULTIPLY, nullableCol(SqlTypeName.DOUBLE, 0), lit(2.0));
+        RexNode declared =
+                rex.makeCall(SqlStdOperatorTable.MULTIPLY, col(SqlTypeName.DOUBLE, 0), lit(2.0));
+
+        assertEquals(
+                GpuCostEstimator.estimate(declared).work().inputBytesPerRow() + 1,
+                GpuCostEstimator.estimate(nullable).work().inputBytesPerRow(),
+                "a nullable column costs its width plus validity");
     }
 
     @Test

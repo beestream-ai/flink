@@ -112,25 +112,27 @@ class GpuOffloadExplainIT {
     }
 
     @Test
-    @DisplayName("a nullable column is refused, and EXPLAIN names NOT NULL as the fix")
-    void nullableColumnIsExplainedAndNotNullFixesIt() {
+    @DisplayName("a nullable column is eligible too, and costs a byte more to carry")
+    void nullableColumnIsEligibleAndCostsMore() {
         tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
         // Same heavy expression, same shape, same row count -- the only difference is the DDL.
         tEnv.executeSql(
                 "CREATE TABLE nullable_t (id BIGINT, val DOUBLE) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '10')");
-        String nullableSql = HEAVY.replace("FROM t", "FROM nullable_t");
 
-        String refused = tEnv.explainSql(nullableSql);
-        assertTrue(refused.contains("== GPU Offload =="), refused);
-        assertTrue(refused.contains("CPU"), refused);
-        assertTrue(
-                refused.contains("NOT NULL"),
-                "EXPLAIN must name the fix, not merely refuse:\n" + refused);
+        // Refused until M2.9, with EXPLAIN naming NOT NULL as the fix. That reading was accurate
+        // and the cost was nearly everything -- see M2.8. The planner now reports eligibility and
+        // the provider decides whether it can represent the null.
+        String nullable = tEnv.explainSql(HEAVY.replace("FROM t", "FROM nullable_t"));
+        assertTrue(nullable.contains("GPU  subtree 0"), nullable);
+        assertFalse(nullable.contains("nullable operand"), nullable);
 
-        // t declares NOT NULL, so the identical expression is selected.
-        String accepted = tEnv.explainSql(HEAVY);
-        assertTrue(accepted.contains("GPU  subtree 0"), accepted);
-        assertFalse(accepted.contains("NOT NULL"), accepted);
+        String declared = tEnv.explainSql(HEAVY);
+        assertTrue(declared.contains("GPU  subtree 0"), declared);
+
+        // NOT NULL remains the cheaper path, and EXPLAIN shows why: no validity to move. Two
+        // columns here -- a BIGINT and a DOUBLE -- so 16 bytes of values and two of validity.
+        assertTrue(nullable.contains("in=18B/row"), nullable);
+        assertTrue(declared.contains("in=16B/row"), declared);
     }
 }

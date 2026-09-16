@@ -28,7 +28,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Exactly what the null refusal excludes, and what a user can do about it.
+ * Where a nullable column is decided, now that the planner no longer decides it.
  *
  * <p>Written for M2.8, whose question was how much the refusal costs. Measured over Flink's own SQL
  * test DDLs — 1,344 tables, 2,495 numeric columns — <b>4.6% of numeric columns are declared {@code
@@ -70,60 +70,74 @@ class GpuNullRefusalIT {
         return plan.substring(plan.indexOf("== GPU Offload =="));
     }
 
-    private void assertRefusedForNullability(String label, String sql) {
+    private void assertEligible(String label, String sql) {
         String section = offloadSection(sql);
         assertThat(section)
-                .as("%s should be refused for nullability:%n%s", label, section)
-                .contains("nullable operand");
-    }
-
-    @Test
-    @DisplayName("a nullable column is refused, and the reason names the fix")
-    void nullableColumnIsRefused() {
-        String section = offloadSection("SELECT " + EXPR + " AS h FROM nullable");
-        assertThat(section).contains("nullable operand");
+                .as("%s should be eligible:%n%s", label, section)
+                .contains("GPU  subtree");
         assertThat(section)
-                .as("the message has to tell the user what to do, since nothing in SQL will")
-                .contains("NOT NULL");
+                .as("and no longer refused by the planner for nullability:%n%s", section)
+                .doesNotContain("nullable operand");
     }
 
     @Test
-    @DisplayName("IS NOT NULL does not rescue it: Calcite keeps the column's declared type")
-    void isNotNullPredicateDoesNotRescue() {
-        assertRefusedForNullability(
-                "IS NOT NULL", "SELECT " + EXPR + " AS h FROM nullable WHERE a IS NOT NULL");
+    @DisplayName("a nullable column is eligible; whether it can be served is the provider's call")
+    void nullableColumnIsEligible() {
+        assertEligible("nullable column", "SELECT " + EXPR + " AS h FROM nullable");
     }
 
     @Test
-    @DisplayName("nor does a predicate that implies non-null, such as a > 0")
-    void impliedNonNullPredicateDoesNotRescue() {
-        assertRefusedForNullability("a > 0", "SELECT " + EXPR + " AS h FROM nullable WHERE a > 0");
+    @DisplayName("and so is one behind an ordinary predicate")
+    void nullableBehindPredicateIsEligible() {
+        // Pinned because it used to be refused, and because it is the case that would change if
+        // anyone implements M2.13: Calcite still types `a` nullable here, so the subtree reaching
+        // the provider still says so. That is a missed optimisation now rather than a refusal.
+        assertEligible("a > 0", "SELECT " + EXPR + " AS h FROM nullable WHERE a > 0");
     }
 
     @Test
-    @DisplayName("nor does pushing the filter into a subquery")
-    void subqueryDoesNotRescue() {
-        assertRefusedForNullability(
-                "subquery",
-                "SELECT " + EXPR + " AS h FROM (SELECT * FROM nullable WHERE a IS NOT NULL)");
+    @DisplayName("IS NOT NULL is still refused — but for want of IR, not for nullability")
+    void isNotNullPredicateHasNoIr() {
+        String section =
+                offloadSection("SELECT " + EXPR + " AS h FROM nullable WHERE a IS NOT NULL");
+
+        // Found by writing this test expecting eligibility and reading why it failed. The operand
+        // refusal is gone; what stops this one is that IS NOT NULL has no AccelFunction, so the
+        // *predicate* cannot be expressed at all.
+        //
+        // It belongs with M2.11 rather than anywhere else: IS NULL and IS NOT NULL are the two
+        // natural operations on a validity bit, and they are trivial to emit once validity exists
+        // and impossible to emit before. Until then this is the odd case where writing the
+        // predicate a user would reach for makes their query *less* offloadable than omitting it.
+        assertThat(section).contains("no accelerator IR for operator IS NOT NULL");
+        assertThat(section).doesNotContain("nullable operand");
     }
 
     @Test
-    @DisplayName("COALESCE, the obvious workaround, is refused for a different reason entirely")
-    void coalesceIsNotSupportedEither() {
+    @DisplayName("COALESCE is still refused, and for its own reason: there is no IR for it")
+    void coalesceIsStillUnsupported() {
         String section =
                 offloadSection(
                         "SELECT " + EXPR.replace("a", "COALESCE(a, 1.0)") + " AS h FROM nullable");
-        // Worth pinning separately from the nullability refusal: a user told to declare NOT NULL
-        // who cannot change the DDL will reach for this, and it fails for want of IR rather than
-        // for want of a null representation. Two different fixes.
+        // Worth keeping separate from nullability. A user told to declare NOT NULL reaches for
+        // this, and it fails for want of IR rather than for want of a null representation -- so
+        // supporting nulls does not fix it, and it was never the cheap independent workaround it
+        // looked like.
         assertThat(section).contains("no accelerator IR for operator COALESCE");
     }
 
     @Test
-    @DisplayName("only the DDL rescues it")
+    @DisplayName("a declared NOT NULL column is eligible too, and is still the cheaper path")
     void declaredNotNullIsEligible() {
-        assertThat(offloadSection("SELECT " + EXPR + " AS h FROM declared"))
-                .contains("GPU  subtree");
+        assertEligible("NOT NULL", "SELECT " + EXPR + " AS h FROM declared");
+    }
+
+    @Test
+    @DisplayName("the work profile charges for the validity a nullable column has to carry")
+    void nullableColumnCostsMoreToTransfer() {
+        // One DOUBLE column either way, so the only difference is the validity byte. A provider
+        // weighs bytes against operations, and a nullable column genuinely costs more to move.
+        assertThat(offloadSection("SELECT " + EXPR + " AS h FROM nullable")).contains("in=9B/row");
+        assertThat(offloadSection("SELECT " + EXPR + " AS h FROM declared")).contains("in=8B/row");
     }
 }
