@@ -66,6 +66,9 @@ public enum AccelFunction {
     ATAN2,
     TANH,
 
+    IS_NULL,
+    IS_NOT_NULL,
+
     FLOOR,
     CEIL,
     SIGN,

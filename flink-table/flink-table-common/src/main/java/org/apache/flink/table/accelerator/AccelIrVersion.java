@@ -34,8 +34,23 @@ public final class AccelIrVersion {
     /** Input, Project, Filter, and an ungrouped Aggregate. */
     public static final int V1 = 1;
 
+    /**
+     * Adds {@link AccelFunction#IS_NULL} and {@link AccelFunction#IS_NOT_NULL}, and stops refusing
+     * a nullable value before it reaches a provider.
+     *
+     * <p>A provider built against {@link #V1} has never been asked to serve a value that might be
+     * absent — Flink refused those itself — so handing it one would be handing it a case it has no
+     * reason to have considered. Hence the bump: this is exactly the mismatch this constant exists
+     * to catch.
+     *
+     * <p>It works because Java inlines a compile-time constant. A provider that writes {@code
+     * AccelIrVersion.CURRENT} compiles the value it was built against into its own class file, so a
+     * jar built against V1 still answers 1 when it meets a Flink that emits 2, and is rejected.
+     */
+    public static final int V2 = 2;
+
     /** The version this Flink emits. */
-    public static final int CURRENT = V1;
+    public static final int CURRENT = V2;
 
     private AccelIrVersion() {}
 }

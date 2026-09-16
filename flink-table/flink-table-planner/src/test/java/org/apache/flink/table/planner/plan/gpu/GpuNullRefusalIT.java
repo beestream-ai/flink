@@ -95,22 +95,28 @@ class GpuNullRefusalIT {
         assertEligible("a > 0", "SELECT " + EXPR + " AS h FROM nullable WHERE a > 0");
     }
 
+    /**
+     * {@code IS NOT NULL} is offloadable, which closes the oddity M2.9 left behind.
+     *
+     * <p>Between M2.9 and M2.11 this was refused — not for nullability, which had already been
+     * relaxed, but because {@code IS NOT NULL} had no {@code AccelFunction} at all. Writing the
+     * predicate a user would reach for made their query <em>less</em> offloadable than omitting it.
+     *
+     * <p>It is trivial once validity exists and was impossible before: the kernel already reads a
+     * bit saying whether each staged value is there, so {@code IS NOT NULL} is that bit and {@code
+     * IS NULL} is its complement. Neither can itself be null, which is what makes them usable in a
+     * {@code WHERE} clause over a nullable column.
+     */
     @Test
-    @DisplayName("IS NOT NULL is still refused — but for want of IR, not for nullability")
-    void isNotNullPredicateHasNoIr() {
-        String section =
-                offloadSection("SELECT " + EXPR + " AS h FROM nullable WHERE a IS NOT NULL");
+    @DisplayName("IS NOT NULL is offloadable now that there is a validity bit for it to read")
+    void isNotNullPredicateIsEligible() {
+        assertEligible("IS NOT NULL", "SELECT " + EXPR + " AS h FROM nullable WHERE a IS NOT NULL");
+    }
 
-        // Found by writing this test expecting eligibility and reading why it failed. The operand
-        // refusal is gone; what stops this one is that IS NOT NULL has no AccelFunction, so the
-        // *predicate* cannot be expressed at all.
-        //
-        // It belongs with M2.11 rather than anywhere else: IS NULL and IS NOT NULL are the two
-        // natural operations on a validity bit, and they are trivial to emit once validity exists
-        // and impossible to emit before. Until then this is the odd case where writing the
-        // predicate a user would reach for makes their query *less* offloadable than omitting it.
-        assertThat(section).contains("no accelerator IR for operator IS NOT NULL");
-        assertThat(section).doesNotContain("nullable operand");
+    @Test
+    @DisplayName("and so is IS NULL")
+    void isNullPredicateIsEligible() {
+        assertEligible("IS NULL", "SELECT " + EXPR + " AS h FROM nullable WHERE a IS NULL");
     }
 
     @Test

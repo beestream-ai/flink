@@ -110,6 +110,10 @@ public final class AccelIrBuilder {
         BY_KIND.put(SqlKind.OR, AccelFunction.OR);
         BY_KIND.put(SqlKind.NOT, AccelFunction.NOT);
         BY_KIND.put(SqlKind.CAST, AccelFunction.CAST);
+        // The two natural operations on a validity bit. Trivial to serve once a provider carries
+        // validity and impossible before, which is why they arrive with V2 rather than V1.
+        BY_KIND.put(SqlKind.IS_NULL, AccelFunction.IS_NULL);
+        BY_KIND.put(SqlKind.IS_NOT_NULL, AccelFunction.IS_NOT_NULL);
         BY_KIND.put(SqlKind.FLOOR, AccelFunction.FLOOR);
         BY_KIND.put(SqlKind.CEIL, AccelFunction.CEIL);
         BY_KIND.put(SqlKind.LEAST, AccelFunction.LEAST);
