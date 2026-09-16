@@ -36,7 +36,7 @@ import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodePlanDumper
 import org.apache.flink.table.planner.plan.optimize.{BatchCommonSubGraphBasedOptimizer, Optimizer}
 import org.apache.flink.table.planner.plan.utils.FlinkRelOptUtil
 import org.apache.flink.table.planner.utils.DummyStreamExecutionEnvironment
-import org.apache.flink.table.runtime.strategy.{AdaptiveBroadcastJoinOptimizationStrategy, AdaptiveSkewedJoinOptimizationStrategy, PostProcessAdaptiveJoinStrategy}
+import org.apache.flink.table.runtime.strategy.{AcceleratorCardinalityStrategy, AdaptiveBroadcastJoinOptimizationStrategy, AdaptiveSkewedJoinOptimizationStrategy, PostProcessAdaptiveJoinStrategy}
 
 import org.apache.calcite.plan.{ConventionTraitDef, RelTrait, RelTraitDef}
 import org.apache.calcite.rel.RelCollationTraitDef
@@ -134,6 +134,13 @@ class BatchPlanner(
     }
     if (isAdaptiveBroadcastJoinEnabled || isAdaptiveSkewedJoinEnabled) {
       optimizationStrategies.add(classOf[PostProcessAdaptiveJoinStrategy].getName)
+    }
+    // M4.3. Whether a subtree can run on a device is settled in the planner; whether there is
+    // enough work arriving to repay setting one up is not knowable here, and is measured once the
+    // input has been produced. Registered only when offload is on, so a job that cannot offload
+    // pays nothing for the strategy.
+    if (configuration.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED)) {
+      optimizationStrategies.add(classOf[AcceleratorCardinalityStrategy].getName)
     }
     configuration.set(
       StreamGraphOptimizationStrategy.STREAM_GRAPH_OPTIMIZATION_STRATEGY,

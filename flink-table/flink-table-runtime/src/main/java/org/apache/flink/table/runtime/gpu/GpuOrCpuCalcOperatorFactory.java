@@ -98,6 +98,16 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
     /** What Flink would have built for this Calc, and what runs if the device is unavailable. */
     private final StreamOperatorFactory<RowData> cpuFactory;
 
+    /**
+     * Rows this subtask will actually see, once something has measured them. Null until then.
+     *
+     * <p>Set on the JobManager by {@code AcceleratorCardinalityStrategy} after the input has been
+     * produced, and read here on the TaskManager. Not final and not immutable on purpose: this is
+     * the same shape adaptive join uses, where the strategy reaches the factory instance still
+     * sitting in the StreamGraph and mutates it before the JobGraph is built. M4.3.
+     */
+    private @Nullable RuntimeCardinality cardinality;
+
     public GpuOrCpuCalcOperatorFactory(
             AcceleratedCalcSpec spec, StreamOperatorFactory<RowData> cpuFactory) {
         this.spec = spec;
@@ -114,6 +124,35 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
      * ServiceConfigurationError} where the service file resolves to something unloadable. A device
      * that cannot be reached must not take the query down with it.
      */
+    /**
+     * Tells this factory how many rows a subtask will really see, replacing the planner's guess.
+     *
+     * <p>Called on the JobManager, once, before the vertex is scheduled. The planner's estimate is
+     * made from catalog statistics in the client and can be wrong by orders of magnitude; by the
+     * time the input has been produced the exact byte count and the parallelism the scheduler
+     * settled on are both known, and the two together are what decide whether there is enough work
+     * per subtask to repay setting a device up at all.
+     *
+     * @param rowsPerSubtask rows one subtask of this node will process
+     * @param provenance how that figure was arrived at, for the decision metric and the log
+     */
+    public void refineCardinality(long rowsPerSubtask, String provenance) {
+        this.cardinality = new RuntimeCardinality(rowsPerSubtask, provenance);
+    }
+
+    /** What a measurement of the real input told us, and how. */
+    private static final class RuntimeCardinality implements java.io.Serializable {
+        private static final long serialVersionUID = 1L;
+
+        private final long rowsPerSubtask;
+        private final String provenance;
+
+        RuntimeCardinality(long rowsPerSubtask, String provenance) {
+            this.rowsPerSubtask = rowsPerSubtask;
+            this.provenance = provenance;
+        }
+    }
+
     @Override
     public <T extends StreamOperator<RowData>> T createStreamOperator(
             StreamOperatorParameters<RowData> parameters) {
@@ -124,13 +163,17 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
             // charge, rather than merely whether it exists.
             Optional<AcceleratorProvider> accelerator = AcceleratorProviders.find(loader);
             if (accelerator.isPresent()) {
+                String tooFew = tooFewRowsToBother();
+                if (tooFew != null) {
+                    return codeGenerated(parameters, tooFew);
+                }
                 AcceleratorChoice.Outcome outcome =
                         AcceleratorChoice.choose(
                                 accelerator.get(),
                                 spec.subtree(),
                                 spec.work(),
                                 spec.minSpeedup(),
-                                spec.work().estimatedRows());
+                                rowsToDecideOn());
                 if (outcome.accelerated()) {
                     StreamOperatorFactory<RowData> built =
                             accelerator
@@ -262,6 +305,60 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
             LOG.info("Could not reserve managed memory for accelerated staging ({})", t.toString());
             return null;
         }
+    }
+
+    /**
+     * The staging width one row costs, for whoever is turning bytes into rows.
+     *
+     * <p>Exposed for {@code AcceleratorCardinalityStrategy}, which has an exact byte count and
+     * needs a row count. Input plus output, the same figure {@link #batchSizeFor} sizes the arena
+     * with.
+     */
+    public int bytesPerRow() {
+        return Math.max(1, spec.work().inputBytesPerRow() + spec.work().outputBytesPerRow());
+    }
+
+    /**
+     * Refuses a subtask that cannot fill one batch, or null when there is enough work. M4.3.
+     *
+     * <p>One batch is the floor because it is the unit the fixed cost is paid in. A subtask sets a
+     * device up once -- compiling the kernel, reserving and zeroing the staging arena, and handing
+     * the provider its first dispatch -- and that cost lands whether the batch it fills is full or
+     * holds eleven rows. Below one batch there is by construction no second batch to spread it
+     * over, so the arithmetic cannot come out in the device's favour however fast the device is.
+     *
+     * <p>Deliberately not a new configuration key. The batch size is already the number the
+     * operator is sized against, and inventing a second threshold would mean two knobs that have to
+     * agree. The ceiling is used rather than the memory-derived batch size of {@link
+     * #batchSizeFor}: the real batch can only be smaller, so this errs toward the CPU, which is the
+     * side that is always correct.
+     *
+     * <p>Silent when nothing measured the input. No measurement means no blocking exchange feeding
+     * this node -- a chained source, most often -- and a planner estimate is not evidence enough to
+     * refuse on.
+     */
+    private @Nullable String tooFewRowsToBother() {
+        RuntimeCardinality measured = cardinality;
+        if (measured == null || measured.rowsPerSubtask >= spec.maxBatchSize()) {
+            return null;
+        }
+        return "too few rows to repay setting a device up: "
+                + measured.rowsPerSubtask
+                + " a subtask against a batch of "
+                + spec.maxBatchSize()
+                + " ("
+                + measured.provenance
+                + ")";
+    }
+
+    /**
+     * Rows to charge the provider's rate against: what was measured, or the planner's estimate.
+     *
+     * <p>The M0.4 half of the decision is unchanged -- the provider still prices its own device and
+     * the comparison still happens here. All that moves is which row count goes into it.
+     */
+    private long rowsToDecideOn() {
+        return cardinality == null ? spec.work().estimatedRows() : cardinality.rowsPerSubtask;
     }
 
     /** The configured ceiling, or what the reserved budget actually fits, whichever is smaller. */
