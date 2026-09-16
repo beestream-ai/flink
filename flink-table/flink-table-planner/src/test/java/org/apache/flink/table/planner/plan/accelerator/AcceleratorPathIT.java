@@ -33,6 +33,8 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory.ACCELERATED;
+import static org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory.DECISION;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -73,6 +75,7 @@ class AcceleratorPathIT {
 
     @BeforeEach
     void setUp() {
+        AccelInterpreterOperator.PUBLISHED.clear();
         tEnv = TableEnvironment.create(EnvironmentSettings.newInstance().inBatchMode().build());
         tEnv.executeSql(
                 // Sequences, not random values: two runs of the same query must produce the same
@@ -267,6 +270,31 @@ class AcceleratorPathIT {
                 .as("the provider must be handed the slot's answer, not the config's")
                 .isPositive()
                 .isLessThan(tEnv.getConfig().get(GpuOffloadOptions.BATCH_SIZE));
+    }
+
+    /**
+     * Which path the subtask took is published, because nothing else can say.
+     *
+     * <p>EXPLAIN reports what the planner decided, and since costing moved to the TaskManager that
+     * is a different question — the plan says eligible, the subtask says served or not. Until this
+     * existed the answer lived only in a log line on the machine that made it, which is how {@code
+     * GpuOffloadExample} came to announce a query "ran on the GPU" while the TaskManager log
+     * recorded a decline. Review finding E2.
+     */
+    @Test
+    @DisplayName("the gauge reads 1 when a provider served the subtask")
+    void acceleratedSubtaskReportsItself() {
+        tEnv.getConfig().set(GpuOffloadOptions.ENABLED, true);
+        TestAcceleratorProvider.enable(10.0);
+
+        run(QUERY);
+
+        assertThat(AccelInterpreterOperator.PUBLISHED.get(ACCELERATED))
+                .as("published: %s", AccelInterpreterOperator.PUBLISHED)
+                .isEqualTo(1);
+        assertThat((String) AccelInterpreterOperator.PUBLISHED.get(DECISION))
+                .as("the reason travels with the verdict, or the gauge only raises questions")
+                .contains("claims");
     }
 
     @Test

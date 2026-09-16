@@ -21,6 +21,8 @@ package org.apache.flink.table.runtime.gpu;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
+import org.apache.flink.metrics.Gauge;
+import org.apache.flink.metrics.groups.OperatorMetricGroup;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
@@ -142,7 +144,7 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
                     }
                     T operator = built.createStreamOperator(parameters);
                     LOG.info("Accelerated on this TaskManager: {}", outcome.reason());
-                    return operator;
+                    return report(operator, true, outcome.reason());
                 }
                 return codeGenerated(parameters, outcome.reason());
             }
@@ -273,8 +275,46 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
         LOG.info(
                 "Accelerator declined on this TaskManager, running the generated CPU operator: {}",
                 reason);
-        return cpuFactory.createStreamOperator(parameters);
+        return report(cpuFactory.createStreamOperator(parameters), false, reason);
     }
+
+    /**
+     * Publishes which path this subtask actually took, as metrics.
+     *
+     * <p>This is the only way to answer "did my query use the accelerator?", and it has to exist
+     * because nothing else can answer it any more. EXPLAIN reports what the <em>planner</em>
+     * decided, and since costing moved to the TaskManager that is a different question: the plan
+     * says a node is eligible, and whether a device served it is settled here, per subtask, against
+     * whatever hardware this machine turned out to have. Two subtasks of one job may answer
+     * differently and both be right.
+     *
+     * <p>Registered by Flink rather than by the provider, on the operator the provider returned. A
+     * provider that publishes nothing still gets this, which is the point — the question belongs to
+     * the person who ran the query, not to the backend that did or did not serve it.
+     *
+     * <p>{@code accelerated} is 1 or 0 rather than a boolean so that a metrics reporter can graph
+     * it; {@code acceleratorDecision} carries the reason, which until now existed only in a log
+     * line on the machine that made it.
+     */
+    private static <T extends StreamOperator<RowData>> T report(
+            T operator, boolean accelerated, String reason) {
+        try {
+            OperatorMetricGroup metrics = operator.getMetricGroup();
+            metrics.gauge(ACCELERATED, (Gauge<Integer>) () -> accelerated ? 1 : 0);
+            metrics.gauge(DECISION, (Gauge<String>) () -> reason);
+        } catch (Throwable t) {
+            // A metric is never worth failing a task for, and a harness may hand back an operator
+            // with no metric group at all.
+            LOG.debug("Could not publish the accelerator decision ({})", t.toString());
+        }
+        return operator;
+    }
+
+    /** 1 when a device served this subtask, 0 when the generated operator did. */
+    public static final String ACCELERATED = "accelerated";
+
+    /** Why, in the words the decision was made in. */
+    public static final String DECISION = "acceleratorDecision";
 
     /**
      * Reports the code-generated operator's class, never the device one.

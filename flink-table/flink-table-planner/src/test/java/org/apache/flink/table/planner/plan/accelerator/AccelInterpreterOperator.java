@@ -18,6 +18,10 @@
 
 package org.apache.flink.table.planner.plan.accelerator;
 
+import org.apache.flink.metrics.Gauge;
+import org.apache.flink.metrics.groups.OperatorIOMetricGroup;
+import org.apache.flink.metrics.groups.OperatorMetricGroup;
+import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -53,6 +57,64 @@ final class AccelInterpreterOperator extends AbstractStreamOperator<RowData>
         this.subtree = subtree;
         this.outputType = outputType;
         this.rowsProcessed = rowsProcessed;
+    }
+
+    /**
+     * What Flink published about this subtask's decision, by metric name.
+     *
+     * <p>Static because the operator a test wants to interrogate is built inside a MiniCluster and
+     * never handed back. Reading it through a metrics reporter would be the obvious alternative and
+     * does not work here: {@code TableEnvironment.create} starts its own cluster, so neither {@code
+     * EnvironmentSettings.withConfiguration} nor a configured {@code MiniClusterExtension} reaches
+     * the registry that would instantiate one.
+     */
+    public static final java.util.Map<String, Object> PUBLISHED =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Records what is registered, and forwards nothing.
+     *
+     * <p>Flink registers the accelerator gauges on whatever operator the provider returned — which
+     * is this one — so overriding the group is how a test sees them.
+     */
+    private transient CapturingGroup capturing;
+
+    @Override
+    public OperatorMetricGroup getMetricGroup() {
+        if (capturing == null) {
+            capturing = new CapturingGroup(super.getMetricGroup());
+        }
+        return capturing;
+    }
+
+    /**
+     * Records the gauges and forwards nothing.
+     *
+     * <p>Nothing here needs real metrics; what the test needs is to see what Flink registered.
+     * Wrapping the real group would be tidier and is not possible — {@code ProxyMetricGroup.gauge}
+     * is final.
+     */
+    private static final class CapturingGroup extends UnregisteredMetricsGroup
+            implements OperatorMetricGroup {
+
+        private final OperatorMetricGroup real;
+
+        CapturingGroup(OperatorMetricGroup real) {
+            this.real = real;
+        }
+
+        @Override
+        public <T, G extends Gauge<T>> G gauge(String name, G gauge) {
+            PUBLISHED.put(name, gauge.getValue());
+            return real.gauge(name, gauge);
+        }
+
+        @Override
+        public OperatorIOMetricGroup getIOMetricGroup() {
+            // Delegated, and it has to be: AbstractStreamOperator counts records through this
+            // during setup, so a no-op group takes the operator down before a test sees anything.
+            return real.getIOMetricGroup();
+        }
     }
 
     @Override
