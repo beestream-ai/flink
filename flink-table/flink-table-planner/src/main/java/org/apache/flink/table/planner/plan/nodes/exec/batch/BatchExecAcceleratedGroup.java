@@ -19,10 +19,7 @@
 package org.apache.flink.table.planner.plan.nodes.exec.batch;
 
 import org.apache.flink.api.dag.Transformation;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
-import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
-import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
@@ -40,7 +37,7 @@ import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTransl
 import org.apache.flink.table.planner.plan.nodes.exec.common.CommonExecCalc;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
-import org.apache.flink.table.runtime.gpu.ChainedCalcAggregateOperator;
+import org.apache.flink.table.runtime.gpu.ChainedCalcAggregateFactory;
 import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
 import org.apache.flink.table.runtime.operators.CodeGenOperatorFactory;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
@@ -128,7 +125,7 @@ public class BatchExecAcceleratedGroup extends ExecNodeBase<RowData>
                         planner,
                         config,
                         inputTransform,
-                        new ChainedOnlyFactory(calcFactory, generated.factory)),
+                        new ChainedCalcAggregateFactory(calcFactory, generated.factory)),
                 InternalTypeInfo.of((RowType) getOutputType()),
                 inputTransform.getParallelism(),
                 generated.managedMemory,
@@ -184,39 +181,5 @@ public class BatchExecAcceleratedGroup extends ExecNodeBase<RowData>
                         config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE),
                         config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
         return new GpuOrCpuCalcOperatorFactory(spec, onCpu);
-    }
-
-    /**
-     * Runs both halves inside one operator, with the projection's output wired into the aggregate.
-     *
-     * <p>No device path is offered, because the fused pair has none to offer: M1.1 removed it. The
-     * members still have to run, and running them as one chained operator is what the pair did
-     * before this node existed.
-     */
-    private static final class ChainedOnlyFactory extends AbstractStreamOperatorFactory<RowData> {
-
-        private static final long serialVersionUID = 1L;
-
-        private final StreamOperatorFactory<RowData> calcFactory;
-        private final StreamOperatorFactory<RowData> aggregateFactory;
-
-        private ChainedOnlyFactory(
-                StreamOperatorFactory<RowData> calcFactory,
-                StreamOperatorFactory<RowData> aggregateFactory) {
-            this.calcFactory = calcFactory;
-            this.aggregateFactory = aggregateFactory;
-        }
-
-        @Override
-        public <T extends StreamOperator<RowData>> T createStreamOperator(
-                StreamOperatorParameters<RowData> parameters) {
-            return ChainedCalcAggregateOperator.chain(
-                    parameters, calcFactory, aggregateFactory, processingTimeService);
-        }
-
-        @Override
-        public Class<? extends StreamOperator> getStreamOperatorClass(ClassLoader classLoader) {
-            return aggregateFactory.getStreamOperatorClass(classLoader);
-        }
     }
 }
