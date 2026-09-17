@@ -99,6 +99,7 @@ public final class AccelIrBuilder {
         BY_KIND.put(SqlKind.MINUS, AccelFunction.MINUS);
         BY_KIND.put(SqlKind.TIMES, AccelFunction.TIMES);
         BY_KIND.put(SqlKind.DIVIDE, AccelFunction.DIVIDE);
+        BY_KIND.put(SqlKind.MOD, AccelFunction.MOD);
         BY_KIND.put(SqlKind.MINUS_PREFIX, AccelFunction.NEGATE);
         BY_KIND.put(SqlKind.EQUALS, AccelFunction.EQUALS);
         BY_KIND.put(SqlKind.NOT_EQUALS, AccelFunction.NOT_EQUALS);
@@ -254,6 +255,13 @@ public final class AccelIrBuilder {
     private static @Nullable AccelFunction functionOf(RexCall call) {
         AccelFunction byKind = BY_KIND.get(call.getKind());
         if (byKind != null) {
+            // Division is two operators wearing one SqlKind. On an integral type SQL truncates
+            // toward zero, and a kernel computing in double answers 3.5 where SQL answers 3 --
+            // which is invisible until it is a grouping key and the groups are wrong. The IR
+            // therefore separates them rather than letting the generator guess from the types.
+            if (byKind == AccelFunction.DIVIDE && isIntegral(call.getType())) {
+                return AccelFunction.INT_DIVIDE;
+            }
             return byKind;
         }
         SqlOperator operator = call.getOperator();
@@ -265,6 +273,19 @@ public final class AccelIrBuilder {
             return BY_DEFINITION.get(((BridgingSqlFunction) operator).getDefinition());
         }
         return BY_CALCITE_OPERATOR.get(operator);
+    }
+
+    /** Whether this type is one SQL does integer arithmetic on. */
+    private static boolean isIntegral(org.apache.calcite.rel.type.RelDataType type) {
+        switch (type.getSqlTypeName()) {
+            case TINYINT:
+            case SMALLINT:
+            case INTEGER:
+            case BIGINT:
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static Optional<AccelExpression> convertLiteral(RexLiteral literal) {

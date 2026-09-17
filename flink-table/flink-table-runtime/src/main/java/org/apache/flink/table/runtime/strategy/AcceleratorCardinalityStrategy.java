@@ -101,6 +101,19 @@ public class AcceleratorCardinalityStrategy implements StreamGraphOptimizationSt
                 GpuOrCpuCalcOperatorFactory offload =
                         (GpuOrCpuCalcOperatorFactory) consumer.getOperatorFactory();
                 int parallelism = consumer.getParallelism();
+                if (parallelism <= 0) {
+                    // AdaptiveBatch reports -1 for a vertex whose parallelism it has not chosen
+                    // yet. Standing a 1 in for it computes the work of a serial vertex that is
+                    // about to be parallel, which overstates what each subtask sees and lets
+                    // through the case this gate exists to refuse. Saying nothing leaves the
+                    // planner's estimate in place, which is the honest answer until the number
+                    // exists. A deployment saw the alternative, logging "over -1 subtasks the
+                    // scheduler chose".
+                    LOG.debug(
+                            "Accelerator cardinality for stream node {}: parallelism undecided, leaving the planner's estimate",
+                            consumer.getId());
+                    continue;
+                }
                 long rows = rowsPerSubtask(bytes, parallelism, offload.bytesPerRow());
                 offload.refineCardinality(
                         rows,
@@ -158,6 +171,8 @@ public class AcceleratorCardinalityStrategy implements StreamGraphOptimizationSt
      * is always correct.
      */
     static long rowsPerSubtask(long bytesProduced, int parallelism, int bytesPerRow) {
+        // Callers filter an undecided parallelism out before here; the floor guards a caller
+        // that forgets, and is deliberately not a way of treating -1 as serial.
         int subtasks = Math.max(1, parallelism);
         int width = Math.max(1, bytesPerRow);
         return bytesProduced / width / subtasks;

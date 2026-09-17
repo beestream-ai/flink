@@ -42,12 +42,18 @@ class AcceleratorCardinalityStrategyTest {
         assertThat(rowsPerSubtask(8_000, 8, 8)).isEqualTo(125);
     }
 
+    /**
+     * An undecided parallelism is filtered out by the caller, not absorbed here.
+     *
+     * <p>AdaptiveBatch reports -1 for a vertex whose parallelism it has not chosen yet, and the
+     * strategy declines to decide rather than standing in a 1. Treating -1 as serial overstates
+     * what each subtask sees, which lets through the very case the gate exists to refuse -- and a
+     * deployment saw it, logging "over -1 subtasks the scheduler chose". The floor below stays as a
+     * guard against a caller that forgets, and this test pins that it is only that.
+     */
     @Test
     @DisplayName("an unset parallelism cannot silently become a divisor")
     void unsetParallelismIsNotUsable() {
-        // -1 is what table.exec.resource.default-parallelism reads when nobody set it. Dividing by
-        // it would produce a negative row count, which reads as "too few" and refuses every job.
-        // The floor keeps the result a count rather than an accident.
         assertThat(rowsPerSubtask(8_000, -1, 8)).isEqualTo(1_000);
         assertThat(rowsPerSubtask(8_000, 0, 8)).isEqualTo(1_000);
     }

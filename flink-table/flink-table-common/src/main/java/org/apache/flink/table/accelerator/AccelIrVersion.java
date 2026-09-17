@@ -49,8 +49,16 @@ public final class AccelIrVersion {
      */
     public static final int V2 = 2;
 
+    /**
+     * Adds {@link AccelFunction#MOD} and {@link AccelFunction#INT_DIVIDE}.
+     *
+     * <p>A provider that reports V2 never sees either: integer arithmetic was previously refused by
+     * the planner rather than mis-computed, and a V2 provider has no rendering for them.
+     */
+    public static final int V3 = 3;
+
     /** The version this Flink emits. */
-    public static final int CURRENT = V2;
+    public static final int CURRENT = V3;
 
     private AccelIrVersion() {}
 }

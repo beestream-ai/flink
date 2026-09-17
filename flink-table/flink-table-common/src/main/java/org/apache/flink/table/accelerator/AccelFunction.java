@@ -37,6 +37,15 @@ public enum AccelFunction {
     MINUS,
     TIMES,
     DIVIDE,
+    /**
+     * Integer division: truncated toward zero, as SQL means it on an integral type.
+     *
+     * <p>Distinct from {@link #DIVIDE} because a kernel computing in double would answer 3.5 where
+     * SQL answers 3, and the difference is invisible until a grouping key is wrong.
+     */
+    INT_DIVIDE,
+    /** Remainder, truncated toward zero, matching SQL's {@code MOD} on an integral type. */
+    MOD,
     NEGATE,
 
     EQUALS,
