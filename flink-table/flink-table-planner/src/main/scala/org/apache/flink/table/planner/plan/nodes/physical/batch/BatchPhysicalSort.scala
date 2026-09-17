@@ -78,11 +78,18 @@ class BatchPhysicalSort(
 
   @Override
   override def translateToExecNode(): ExecNode[_] = {
-    new BatchExecSort(
+    val execNode = new BatchExecSort(
       unwrapTableConfig(this),
       SortUtil.getSortSpec(sortCollation.getFieldCollations),
       InputProperty.builder().damBehavior(InputProperty.DamBehavior.END_INPUT).build(),
       FlinkTypeFactory.toLogicalRowType(getRowType),
       getRelDetailedDescription)
+    // As BatchPhysicalCalc does, and for a sharper reason here. A sort has no expressions to
+    // price, so the cardinality is not a refinement of its cost -- it is the whole of it: n log n
+    // comparisons is a statement about n. It also decides whether the offload can be taken at all,
+    // because a device sort has to hold its whole input and something has to say how big that is
+    // before the first row arrives.
+    execNode.setEstimatedRowCount(getCluster.getMetadataQuery.getRowCount(this))
+    execNode
   }
 }
