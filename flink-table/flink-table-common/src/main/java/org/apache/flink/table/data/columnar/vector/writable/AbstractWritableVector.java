@@ -52,4 +52,17 @@ public abstract class AbstractWritableVector implements WritableColumnVector, Se
     public boolean hasDictionary() {
         return this.dictionary != null;
     }
+
+    /**
+     * Whether any slot in this vector is null.
+     *
+     * <p>The counterpart of {@link #hasDictionary()}, and it answers the same kind of question for
+     * the same kind of consumer: both are conditions under which a vector's backing array is not
+     * simply its values, and a consumer that wants to copy a range of one rather than read it a
+     * slot at a time has to be able to ask. {@code isNullAt} answers per row, which is the check
+     * such a copy exists to avoid.
+     */
+    public boolean hasNulls() {
+        return !noNulls;
+    }
 }

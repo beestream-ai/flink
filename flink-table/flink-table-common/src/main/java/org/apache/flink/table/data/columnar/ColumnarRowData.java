@@ -64,6 +64,32 @@ public final class ColumnarRowData implements RowData, TypedSetters {
         this.rowId = rowId;
     }
 
+    /**
+     * The batch this row is a cursor into.
+     *
+     * <p>Exposed for consumers that want the column rather than the row. A vectorized source has
+     * already produced each column packed and contiguous, and anything that copies a range of one
+     * -- into a network buffer, an accelerator's staging memory, another columnar format -- can do
+     * it in one operation instead of {@code arity x rows} accessor calls. Reaching the batch is the
+     * only thing standing between such a consumer and that copy, and there was no way to ask for
+     * it; the setters have always been public.
+     */
+    public VectorizedColumnBatch getVectorizedColumnBatch() {
+        return vectorizedColumnBatch;
+    }
+
+    /**
+     * Which row of {@link #getVectorizedColumnBatch()} this instance currently points at.
+     *
+     * <p>A reader hands out one {@code ColumnarRowData} and moves it, so this changes under any
+     * consumer that keeps the reference. It is the row's identity within the batch, not a stable
+     * one: two reads of the same reference can disagree, which is exactly why a consumer batching
+     * rows has to read it as each row arrives rather than afterwards.
+     */
+    public int getRowId() {
+        return rowId;
+    }
+
     @Override
     public RowKind getRowKind() {
         return rowKind;
