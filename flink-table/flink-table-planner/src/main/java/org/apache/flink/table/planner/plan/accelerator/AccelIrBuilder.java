@@ -30,12 +30,14 @@ import org.apache.flink.table.accelerator.AccelInputRef;
 import org.apache.flink.table.accelerator.AccelLiteral;
 import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.accelerator.AccelProject;
+import org.apache.flink.table.accelerator.AccelSort;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
+import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -214,6 +216,27 @@ public final class AccelIrBuilder {
      * @param input the projection feeding the aggregate, already in IR
      * @param outputType the aggregate's own output row
      */
+    /**
+     * The IR for a sort, or empty when the spec is not one a device can order.
+     *
+     * <p>Takes the input row rather than a subtree beneath it: a sort does not care what produced
+     * its rows and cannot fuse with it — the producer is per-row and the sort is not, so there is
+     * no single kernel the pair could become.
+     */
+    public static Optional<AccelNode> buildSort(SortSpec sortSpec, RowType inputType) {
+        if (sortSpec.getFieldSize() != 1) {
+            return Optional.empty();
+        }
+        SortSpec.SortFieldSpec field = sortSpec.getFieldSpec(0);
+        return Optional.of(
+                new AccelSort(
+                        field.getFieldIndex(),
+                        field.getIsAscendingOrder(),
+                        field.getNullIsLast(),
+                        new AccelInput(inputType),
+                        inputType));
+    }
+
     public static Optional<AccelNode> buildAggregate(
             int[] grouping, List<AggregateCall> aggCalls, AccelNode input, RowType outputType) {
 

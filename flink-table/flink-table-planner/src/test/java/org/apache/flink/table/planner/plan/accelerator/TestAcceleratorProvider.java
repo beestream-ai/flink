@@ -23,6 +23,7 @@ import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.table.accelerator.AccelAggregate;
 import org.apache.flink.table.accelerator.AccelIrVersion;
 import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.accelerator.AccelSort;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.accelerator.AcceleratorContext;
@@ -70,6 +71,10 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
     public static final java.util.concurrent.atomic.AtomicBoolean LAST_WAS_AGGREGATE =
             new java.util.concurrent.atomic.AtomicBoolean();
 
+    /** Whether the last subtree offered was a sort, so a test can tell which seam fired. */
+    public static final java.util.concurrent.atomic.AtomicBoolean LAST_WAS_SORT =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     /** Times {@link #accept} returned a plan. */
     public static final AtomicInteger PLANS_OFFERED = new AtomicInteger();
 
@@ -105,6 +110,7 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
         speedup = 10.0;
         AccelInterpreter.corrupt = false;
         LAST_WAS_AGGREGATE.set(false);
+        LAST_WAS_SORT.set(false);
     }
 
     /** Makes the interpreter compute TIMES as addition, to prove the harness can detect it. */
@@ -127,15 +133,22 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
         if (!enabled) {
             return Optional.empty();
         }
-        boolean interpretable =
-                subtree instanceof AccelAggregate
-                        ? AccelInterpreter.canInterpret(subtree.inputs().get(0))
-                        : AccelInterpreter.canInterpret(subtree);
+        boolean interpretable;
+        if (subtree instanceof AccelSort) {
+            // A sort names a key and says nothing about expressions, so there is nothing for the
+            // interpreter to be able or unable to evaluate.
+            interpretable = true;
+        } else if (subtree instanceof AccelAggregate) {
+            interpretable = AccelInterpreter.canInterpret(subtree.inputs().get(0));
+        } else {
+            interpretable = AccelInterpreter.canInterpret(subtree);
+        }
         if (!interpretable) {
             return Optional.empty();
         }
         PLANS_OFFERED.incrementAndGet();
         LAST_WAS_AGGREGATE.set(subtree instanceof AccelAggregate);
+        LAST_WAS_SORT.set(subtree instanceof AccelSort);
         return Optional.of(new Plan(subtree, new AcceleratorCost(speedup, 0L, 0L)));
     }
 
@@ -145,6 +158,11 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
         LAST_MAX_BATCH_SIZE.set(context.maxBatchSize());
         LAST_HAD_MANAGED_MEMORY.set(context.providesOffHeap());
         AccelNode subtree = (AccelNode) plan.payload();
+        if (subtree instanceof AccelSort) {
+            return SimpleOperatorFactory.of(
+                    new AccelSortInterpreterOperator(
+                            (AccelSort) subtree, context.outputType(), ROWS_PROCESSED));
+        }
         if (subtree instanceof AccelAggregate) {
             return SimpleOperatorFactory.of(
                     new AccelAggregateInterpreterOperator(

@@ -22,10 +22,16 @@ import org.apache.flink.FlinkVersion;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
+import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
+import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.planner.codegen.sort.SortCodeGenerator;
 import org.apache.flink.table.planner.delegation.PlannerBase;
+import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
+import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
+import org.apache.flink.table.planner.plan.gpu.GpuSortSupport;
+import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
@@ -35,6 +41,8 @@ import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTranslator;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
+import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
+import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
 import org.apache.flink.table.runtime.operators.sort.SortOperator;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
@@ -44,6 +52,7 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonPro
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * {@link BatchExecNode} for Sort without limit.
@@ -132,10 +141,60 @@ public class BatchExecSort extends ExecNodeBase<RowData>
         return ExecNodeUtil.createOneInputTransformation(
                 inputTransform,
                 createTransformationMeta(SORT_TRANSFORMATION, config),
-                SimpleOperatorFactory.of(operator),
+                substitute(config, inputType, SimpleOperatorFactory.of(operator)),
                 InternalTypeInfo.of((RowType) getOutputType()),
                 inputTransform.getParallelism(),
                 sortMemory,
                 false);
+    }
+
+    /**
+     * Offers the sort to an accelerator, or returns Flink's own sort operator unchanged.
+     *
+     * <p>The same seam the Calc has, and deliberately so: both implementations travel in the
+     * JobGraph and the TaskManager picks. What differs is what a provider is being offered. A Calc
+     * is per-row work a device can start on immediately; a sort cannot emit anything until it has
+     * seen everything, so a provider that takes this is undertaking to hold the whole input — and
+     * is expected to decline on size rather than spill, because {@code SortOperator} below already
+     * knows how to spill and this does not.
+     */
+    private StreamOperatorFactory<RowData> substitute(
+            ExecNodeConfig config, RowType inputType, StreamOperatorFactory<RowData> onCpu) {
+        GpuOffloadAssignment assignment = getGpuOffloadAssignment();
+        if (assignment == null || !assignment.isOffloaded() || config.isCompiled()) {
+            // M4.4: a compiled plan does not offload, and a sort is no exception.
+            return onCpu;
+        }
+        Optional<AccelNode> subtree = AccelIrBuilder.buildSort(sortSpec, inputType);
+        if (!subtree.isPresent()) {
+            return onCpu;
+        }
+        AcceleratedCalcSpec spec =
+                new AcceleratedCalcSpec(
+                        subtree.get(),
+                        assignment.verdict().work(),
+                        (RowType) getOutputType(),
+                        config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE),
+                        config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
+        return new GpuOrCpuCalcOperatorFactory(spec, onCpu);
+    }
+
+    /**
+     * A sort is offloadable in principle; {@link #estimateRowCost()} decides whether this one is.
+     *
+     * <p>Unconditional, unlike the aggregate's {@code !isMerge}: there is no half of a sort that is
+     * cheap to serve and no flag that distinguishes one. The refusals are all about the key.
+     */
+    @Override
+    public boolean supportGpuOffload() {
+        return true;
+    }
+
+    @Override
+    public RowCost estimateRowCost() {
+        RowType inputType = (RowType) getInputEdges().get(0).getOutputType();
+        double rows = getEstimatedRowCount();
+        long estimated = rows <= 0 ? 0L : (long) rows;
+        return GpuSortSupport.estimate(sortSpec, inputType, estimated);
     }
 }

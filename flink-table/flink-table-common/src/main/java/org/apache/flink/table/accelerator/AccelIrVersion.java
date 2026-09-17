@@ -66,7 +66,17 @@ public final class AccelIrVersion {
     public static final int V4 = 4;
 
     /** The version this Flink emits. */
-    public static final int CURRENT = V4;
+    /**
+     * Adds {@link AccelSort}.
+     *
+     * <p>A provider reporting V4 never sees one, which matters more here than for the nodes before
+     * it: every earlier node is per-row or partial, and a provider written against them may
+     * reasonably assume it can serve a batch and emit. A sort cannot be served that way, so meeting
+     * one unprepared is not a missing rendering but a wrong answer.
+     */
+    public static final int V5 = 5;
+
+    public static final int CURRENT = V5;
 
     private AccelIrVersion() {}
 }
