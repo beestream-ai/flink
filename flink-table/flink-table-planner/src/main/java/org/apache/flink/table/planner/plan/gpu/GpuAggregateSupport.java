@@ -48,11 +48,16 @@ import org.apache.calcite.sql.type.SqlTypeName;
  *       hashing, which no bound library provides.
  * </ul>
  *
- * <h2>No GROUP BY</h2>
+ * <h2>GROUP BY</h2>
  *
- * <p>A grouped sum is a sparse matrix-vector product -- CSR with row = group, column = input row --
- * and {@code cusparseSpMV} is bound and would serve it. Nothing here builds the grouping matrix
- * yet, so grouped aggregates are refused with that reason rather than silently falling through.
+ * <p>Admitted since M5.3. It was refused while the only device route imagined for it was a sparse
+ * matrix-vector product needing a grouping matrix nobody built; a bound library has the primitive
+ * instead, and what reaches it is a key column and a value column.
+ *
+ * <p>The grouping costs nothing extra here, and that is not an oversight. A group-by is a library
+ * call whose cost is a property of the library rather than of the expression, and what decides
+ * whether the pair is worth moving is the <em>Calc</em> underneath it. The provider prices its own
+ * primitive on the TaskManager, which is where that knowledge lives.
  */
 public final class GpuAggregateSupport {
 
@@ -71,13 +76,16 @@ public final class GpuAggregateSupport {
     /**
      * Costs an aggregate node, or explains what about it a device cannot do.
      *
-     * @param grouping the grouping key indexes; only the empty set is supported
-     * @param auxGrouping auxiliary grouping columns, which imply a grouped aggregate
+     * @param grouping the grouping key indexes, which may be empty
+     * @param auxGrouping auxiliary grouping columns
      * @param aggCalls the aggregate calls to compute
      */
     public static RowCost estimate(int[] grouping, int[] auxGrouping, AggregateCall[] aggCalls) {
-        if (grouping.length > 0 || auxGrouping.length > 0) {
-            return RowCost.ineligible("GROUP BY is not offloaded; it needs a grouping matrix");
+        if (auxGrouping.length > 0) {
+            // Auxiliary grouping carries columns through that the key functionally determines.
+            // Correct on a device, but the IR has no way to say "carry this", so refusing is the
+            // honest answer rather than dropping the columns.
+            return RowCost.ineligible("auxiliary grouping columns are not expressed on device");
         }
         if (aggCalls.length == 0) {
             return RowCost.ineligible("no aggregate calls to compute");

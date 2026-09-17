@@ -132,6 +132,16 @@ public abstract class CommonExecCalc extends ExecNodeBase<RowData>
      * operator there is no Calc transformation to build, but there is still a Calc operator: it is
      * what the TaskManager runs, chained ahead of the aggregate, when no device is available.
      */
+    /** The projection expressions, for a node that has absorbed this one. */
+    public List<RexNode> projection() {
+        return projection;
+    }
+
+    /** The filter, or null. */
+    public @Nullable RexNode condition() {
+        return condition;
+    }
+
     public CodeGenOperatorFactory<RowData> generateCalcOperator(
             CodeGeneratorContext ctx, Transformation<RowData> inputTransform) {
         return CalcCodeGenerator.generateCalcOperator(

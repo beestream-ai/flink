@@ -57,8 +57,16 @@ public final class AccelIrVersion {
      */
     public static final int V3 = 3;
 
+    /**
+     * Admits a grouping set on {@link AccelAggregate}.
+     *
+     * <p>A provider reporting V3 never sees one: before this the planner refused a grouped
+     * aggregate outright, so there is no older provider with an opinion about what it means.
+     */
+    public static final int V4 = 4;
+
     /** The version this Flink emits. */
-    public static final int CURRENT = V3;
+    public static final int CURRENT = V4;
 
     private AccelIrVersion() {}
 }

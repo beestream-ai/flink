@@ -18,6 +18,9 @@
 
 package org.apache.flink.table.planner.plan.accelerator;
 
+import org.apache.flink.table.accelerator.AccelAggCall;
+import org.apache.flink.table.accelerator.AccelAggFunction;
+import org.apache.flink.table.accelerator.AccelAggregate;
 import org.apache.flink.table.accelerator.AccelCall;
 import org.apache.flink.table.accelerator.AccelExpression;
 import org.apache.flink.table.accelerator.AccelFilter;
@@ -36,6 +39,7 @@ import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
+import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
@@ -193,6 +197,76 @@ public final class AccelIrBuilder {
      *
      * @return empty when any expression has no representation, which is an ordinary outcome
      */
+    /**
+     * A grouped or ungrouped partial aggregate over an already-built projection.
+     *
+     * <p>The node this produces is Flink's <em>local</em> aggregate, which is partial: it may emit
+     * several rows per key and the merge half above the shuffle combines them. A provider may
+     * therefore aggregate a batch at a time and emit as it goes, carrying no state between batches
+     * -- which is the whole reason a device group-by is workable at all.
+     *
+     * <p>Refused, by returning empty, when any call is one the IR has no function for. SUM and
+     * COUNT(*) are what a local aggregate mostly produces; AVG is not among them because its
+     * accumulator is two fields and the IR describes one value per call.
+     *
+     * @param grouping key field indexes into the projection's output
+     * @param aggCalls the local aggregate's calls, in output order after the keys
+     * @param input the projection feeding the aggregate, already in IR
+     * @param outputType the aggregate's own output row
+     */
+    public static Optional<AccelNode> buildAggregate(
+            int[] grouping, List<AggregateCall> aggCalls, AccelNode input, RowType outputType) {
+
+        List<AccelAggCall> calls = new ArrayList<>(aggCalls.size());
+        for (int i = 0; i < aggCalls.size(); i++) {
+            AggregateCall call = aggCalls.get(i);
+            Optional<AccelAggCall> converted =
+                    convertAggCall(call, outputType, grouping.length + i);
+            if (!converted.isPresent()) {
+                return Optional.empty();
+            }
+            calls.add(converted.get());
+        }
+        if (calls.isEmpty()) {
+            // Nothing to contract; the grouping alone is a DISTINCT and a different operator.
+            return Optional.empty();
+        }
+        return Optional.of(new AccelAggregate(grouping, calls, input, outputType));
+    }
+
+    private static Optional<AccelAggCall> convertAggCall(
+            AggregateCall call, RowType outputType, int outputField) {
+        if (call.isDistinct() || call.isApproximate() || call.hasFilter()) {
+            // DISTINCT needs a second pass the IR does not describe, and a FILTER is a predicate
+            // the aggregate would have to evaluate rather than the projection beneath it.
+            return Optional.empty();
+        }
+        LogicalType resultType = outputType.getTypeAt(outputField);
+        switch (call.getAggregation().getKind()) {
+            case SUM:
+            case SUM0:
+                if (call.getArgList().size() != 1) {
+                    return Optional.empty();
+                }
+                return Optional.of(
+                        new AccelAggCall(
+                                AccelAggFunction.SUM, call.getArgList().get(0), resultType));
+            case COUNT:
+                // Only COUNT(*). COUNT(x) skips nulls, which is a different contraction and needs
+                // the validity of x, not just its values.
+                if (!call.getArgList().isEmpty()) {
+                    return Optional.empty();
+                }
+                return Optional.of(
+                        new AccelAggCall(
+                                AccelAggFunction.COUNT_STAR,
+                                AccelAggCall.NO_INPUT_FIELD,
+                                resultType));
+            default:
+                return Optional.empty();
+        }
+    }
+
     public static Optional<AccelNode> buildCalc(
             List<RexNode> projection,
             @Nullable RexNode condition,

@@ -26,6 +26,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -100,12 +101,24 @@ class GpuAggregateFusionIT {
         }
     }
 
+    /**
+     * A grouped aggregate is selected since M5.3.
+     *
+     * <p>It was refused while the only device route imagined for it was a sparse matrix-vector
+     * product needing a grouping matrix nobody built. A bound library has the primitive instead,
+     * and what reaches it is a key column and a value column -- so the reason the old assertion
+     * pinned no longer exists. Whether it then runs on a device is settled on the TaskManager, as
+     * it is for everything else.
+     */
     @Test
-    @DisplayName("GROUP BY is refused, and says what it would need")
-    void groupByIsRefused() {
+    @DisplayName("GROUP BY joins the Calc that feeds it, as one subtree")
+    void groupByJoinsTheCalc() {
         String s =
                 section("SELECT k, SUM(h) FROM (SELECT k, " + HEAVY + " AS h FROM t) GROUP BY k");
-        assertTrue(s.contains("grouping matrix"), s);
+        assertTrue(s.contains("GPU  subtree"), s);
+        assertTrue(
+                s.contains("LocalHashAggregate"), "the aggregate should be in the subtree:\n" + s);
+        assertFalse(s.contains("grouping matrix"), s);
     }
 
     @Test

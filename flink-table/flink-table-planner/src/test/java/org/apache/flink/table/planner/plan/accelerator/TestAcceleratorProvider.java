@@ -20,6 +20,7 @@ package org.apache.flink.table.planner.plan.accelerator;
 
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
+import org.apache.flink.table.accelerator.AccelAggregate;
 import org.apache.flink.table.accelerator.AccelIrVersion;
 import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
@@ -60,6 +61,15 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
     /** Rows this provider has actually processed, across all instances. */
     public static final AtomicInteger ROWS_PROCESSED = new AtomicInteger();
 
+    /**
+     * Whether the last plan accepted was a grouped aggregate rather than a projection.
+     *
+     * <p>Without it a test can only see that <em>something</em> was offered, and "the Calc was
+     * offered" and "the fused aggregate was offered" look identical from outside.
+     */
+    public static final java.util.concurrent.atomic.AtomicBoolean LAST_WAS_AGGREGATE =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     /** Times {@link #accept} returned a plan. */
     public static final AtomicInteger PLANS_OFFERED = new AtomicInteger();
 
@@ -94,6 +104,7 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
         enabled = false;
         speedup = 10.0;
         AccelInterpreter.corrupt = false;
+        LAST_WAS_AGGREGATE.set(false);
     }
 
     /** Makes the interpreter compute TIMES as addition, to prove the harness can detect it. */
@@ -116,10 +127,15 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
         if (!enabled) {
             return Optional.empty();
         }
-        if (!AccelInterpreter.canInterpret(subtree)) {
+        boolean interpretable =
+                subtree instanceof AccelAggregate
+                        ? AccelInterpreter.canInterpret(subtree.inputs().get(0))
+                        : AccelInterpreter.canInterpret(subtree);
+        if (!interpretable) {
             return Optional.empty();
         }
         PLANS_OFFERED.incrementAndGet();
+        LAST_WAS_AGGREGATE.set(subtree instanceof AccelAggregate);
         return Optional.of(new Plan(subtree, new AcceleratorCost(speedup, 0L, 0L)));
     }
 
@@ -128,9 +144,14 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
             AcceleratorPlan plan, AcceleratorContext context) {
         LAST_MAX_BATCH_SIZE.set(context.maxBatchSize());
         LAST_HAD_MANAGED_MEMORY.set(context.providesOffHeap());
+        AccelNode subtree = (AccelNode) plan.payload();
+        if (subtree instanceof AccelAggregate) {
+            return SimpleOperatorFactory.of(
+                    new AccelAggregateInterpreterOperator(
+                            (AccelAggregate) subtree, context.outputType(), ROWS_PROCESSED));
+        }
         return SimpleOperatorFactory.of(
-                new AccelInterpreterOperator(
-                        (AccelNode) plan.payload(), context.outputType(), ROWS_PROCESSED));
+                new AccelInterpreterOperator(subtree, context.outputType(), ROWS_PROCESSED));
     }
 
     private static final class Plan implements AcceleratorPlan {

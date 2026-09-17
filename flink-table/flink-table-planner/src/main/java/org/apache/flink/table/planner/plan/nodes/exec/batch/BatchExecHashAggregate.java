@@ -179,6 +179,21 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
                 false);
     }
 
+    /** Grouping key field indexes into this node's input row. */
+    int[] grouping() {
+        return grouping;
+    }
+
+    /** The calls this local aggregate computes, in the order they follow the keys. */
+    java.util.List<AggregateCall> aggCalls() {
+        return java.util.Arrays.asList(aggCalls);
+    }
+
+    /** Whether this half merges partial accumulators rather than reading rows. */
+    boolean isMerge() {
+        return isMerge;
+    }
+
     /** The generated aggregate operator, and the managed memory it needs. */
     static final class GeneratedAggregate {
         final CodeGenOperatorFactory<RowData> factory;

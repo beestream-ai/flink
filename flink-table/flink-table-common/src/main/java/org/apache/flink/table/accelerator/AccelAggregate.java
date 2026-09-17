@@ -28,10 +28,15 @@ import java.util.List;
 /**
  * Contracts its input to one row per group.
  *
- * <p><b>V1 admits only the empty grouping set</b> — an ungrouped aggregate. A grouped aggregate is
- * a sparse matrix-vector product and needs a grouping matrix nothing builds yet; admitting the
- * field now means a provider never has to guess whether {@code grouping} can be non-empty, and a
- * later IR version can widen it without changing the shape.
+ * <p><b>V1 to V3 admitted only the empty grouping set</b>, because the only device route then
+ * imagined for a grouped aggregate was a sparse matrix-vector product and nothing built the
+ * grouping matrix. V4 admits a grouping set, because a device group-by turned out not to need one:
+ * a library has the primitive, and what reaches it is a key column and a value column.
+ *
+ * <p>The node is a <em>partial</em> aggregate and that is what makes it workable. Flink splits
+ * aggregation into a local half and a merge half, and the local half may emit several rows per key
+ * for the merge to combine. So a provider may aggregate a batch at a time and emit as it goes, with
+ * no state carried between batches and nothing to spill.
  */
 @PublicEvolving
 public final class AccelAggregate extends AccelNode {
@@ -45,20 +50,13 @@ public final class AccelAggregate extends AccelNode {
 
     public AccelAggregate(
             int[] grouping, List<AccelAggCall> calls, AccelNode input, RowType outputType) {
-        if (grouping.length != 0) {
-            throw new IllegalArgumentException(
-                    "accelerator IR v"
-                            + AccelIrVersion.CURRENT
-                            + " admits only an ungrouped aggregate; GROUP BY needs a grouping "
-                            + "matrix that is not built yet");
-        }
         this.grouping = grouping.clone();
         this.calls = Collections.unmodifiableList(new ArrayList<>(calls));
         this.input = input;
         this.outputType = outputType;
     }
 
-    /** Grouping key field indexes. Empty in V1. */
+    /** Grouping key field indexes into the input row; empty for an ungrouped aggregate. */
     public int[] grouping() {
         return grouping.clone();
     }
