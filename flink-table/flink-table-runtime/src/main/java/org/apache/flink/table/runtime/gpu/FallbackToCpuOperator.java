@@ -40,6 +40,9 @@ import org.apache.flink.table.data.RowData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
+
+import java.io.Closeable;
 import java.util.function.Supplier;
 
 /**
@@ -74,15 +77,29 @@ public final class FallbackToCpuOperator
 
     private final Supplier<OneInputStreamOperator<RowData, RowData>> cpu;
 
+    /**
+     * The accelerated operator's staging memory, given back before the generated one is built.
+     *
+     * <p>Not politeness. Staging reserves the slot's whole operator share of managed memory, and
+     * the operator this falls back to is the one Flink generated -- which for anything above a
+     * projection wants managed memory of its own: a hash table, a sorter, a spilling buffer. Both
+     * cannot hold it. A fallback that does not release first dies asking for memory the operator it
+     * is replacing is still holding, and takes the job down, which is the opposite of what this
+     * class exists for.
+     */
+    private final @Nullable Closeable staging;
+
     private OneInputStreamOperator<RowData, RowData> delegate;
     private boolean accelerated = true;
     private boolean sawFirstRecord;
 
     FallbackToCpuOperator(
             OneInputStreamOperator<RowData, RowData> accelerated,
-            Supplier<OneInputStreamOperator<RowData, RowData>> cpu) {
+            Supplier<OneInputStreamOperator<RowData, RowData>> cpu,
+            @Nullable Closeable staging) {
         this.delegate = accelerated;
         this.cpu = cpu;
+        this.staging = staging;
     }
 
     /**
@@ -134,6 +151,7 @@ public final class FallbackToCpuOperator
         } catch (Throwable ignored) {
             // Already failing; a failure while closing the failed operator adds nothing.
         }
+        releaseStaging();
         delegate = cpu.get();
         accelerated = false;
     }
@@ -250,11 +268,32 @@ public final class FallbackToCpuOperator
     }
 
     /** Builds one, given the accelerated operator and a way to make the generated one. */
+    /**
+     * Gives the staging memory back, after the accelerated operator is done with it and before the
+     * generated one asks for any.
+     *
+     * <p>Ordered, not incidental: the buffers staging handed out are freed by this, and the
+     * accelerated operator is closed just above. Releasing earlier would pull memory out from under
+     * a kernel that is still running.
+     */
+    private void releaseStaging() {
+        if (staging == null) {
+            return;
+        }
+        try {
+            staging.close();
+        } catch (Throwable t) {
+            // The generated operator may still fit in what is left; let it try and say so.
+            LOG.warn("could not release accelerated staging memory before falling back", t);
+        }
+    }
+
     static FallbackToCpuOperator around(
             OneInputStreamOperator<RowData, RowData> accelerated,
             StreamOperatorFactory<RowData> cpuFactory,
-            StreamOperatorParameters<RowData> parameters) {
+            StreamOperatorParameters<RowData> parameters,
+            @Nullable Closeable staging) {
         return new FallbackToCpuOperator(
-                accelerated, () -> cpuFactory.createStreamOperator(parameters));
+                accelerated, () -> cpuFactory.createStreamOperator(parameters), staging);
     }
 }

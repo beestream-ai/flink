@@ -175,12 +175,17 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
                                 spec.minSpeedup(),
                                 rowsToDecideOn());
                 if (outcome.accelerated()) {
+                    // Reserved here rather than inside contextFor so that the guard below can
+                    // give it back. Staging holds the slot's whole operator share of managed
+                    // memory, and the generated operator this falls back to wants managed memory
+                    // of its own -- a hash table, a sorter -- so the two cannot both hold it.
+                    ManagedOffHeapArena staging = reserveStagingMemory(spec, parameters);
                     StreamOperatorFactory<RowData> built =
                             accelerator
                                     .get()
                                     .createOperator(
                                             outcome.plan().get(),
-                                            contextFor(spec, loader, parameters));
+                                            contextFor(spec, loader, parameters, staging));
                     built.setChainingStrategy(getChainingStrategy());
                     if (built instanceof ProcessingTimeServiceAware) {
                         ((ProcessingTimeServiceAware) built)
@@ -196,7 +201,8 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
                             FallbackToCpuOperator.around(
                                     (OneInputStreamOperator<RowData, RowData>) device,
                                     cpuFactory,
-                                    parameters);
+                                    parameters,
+                                    staging);
                     @SuppressWarnings("unchecked")
                     T operator = (T) guarded;
                     return report(operator, guarded, outcome.reason());
@@ -229,9 +235,9 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
     private static AcceleratorContext contextFor(
             AcceleratedCalcSpec spec,
             ClassLoader loader,
-            StreamOperatorParameters<RowData> parameters) {
+            StreamOperatorParameters<RowData> parameters,
+            @Nullable ManagedOffHeapArena arena) {
 
-        final ManagedOffHeapArena arena = reserveStagingMemory(spec, parameters);
         final int batchSize = batchSizeFor(spec, arena);
 
         return new AcceleratorContext() {
