@@ -43,6 +43,7 @@ import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeContext;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeMetadata;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOverAggregateSupport;
@@ -276,7 +277,10 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
     @Override
     public RowCost estimateRowCost() {
         RowType inputType = (RowType) getInputEdges().get(0).getOutputType();
-        return GpuOverAggregateSupport.estimate(overSpec, inputType, (RowType) getOutputType());
+        double rows = getEstimatedRowCount();
+        long estimated = rows <= 0 ? AccelWorkProfile.UNKNOWN_ROWS : (long) rows;
+        return GpuOverAggregateSupport.estimate(
+                overSpec, inputType, (RowType) getOutputType(), estimated);
     }
 
     private List<OverWindowFrame> createOverWindowFrames(

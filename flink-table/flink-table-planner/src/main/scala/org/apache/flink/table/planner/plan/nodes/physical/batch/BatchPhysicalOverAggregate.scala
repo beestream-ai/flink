@@ -68,7 +68,7 @@ class BatchPhysicalOverAggregate(
     } else {
       InputProperty.hashDistribution(partitionKeyIndices)
     }
-    new BatchExecOverAggregate(
+    val execNode = new BatchExecOverAggregate(
       unwrapTableConfig(this),
       new OverSpec(
         new PartitionSpec(partitionKeyIndices),
@@ -78,5 +78,13 @@ class BatchPhysicalOverAggregate(
       InputProperty.builder().requiredDistribution(requiredDistribution).build(),
       FlinkTypeFactory.toLogicalRowType(getRowType),
       getRelDetailedDescription)
+    // As BatchPhysicalSort does, and here to avoid a trap rather than to sharpen a cost. A running
+    // total needs no cardinality of its own -- it holds one double and fits at any size. But the
+    // offload processor groups adjacent offloadable nodes into one subtree, and AccelWorkProfile
+    // merges by taking UNKNOWN_ROWS if either side has it. An OVER window sitting above the Sort
+    // its own ORDER BY created is exactly that adjacency, so a window reporting "unknown" erased
+    // the sort's estimate and silently disabled M5.4's offload for every query that has both.
+    execNode.setEstimatedRowCount(getCluster.getMetadataQuery.getRowCount(this))
+    execNode
   }
 }

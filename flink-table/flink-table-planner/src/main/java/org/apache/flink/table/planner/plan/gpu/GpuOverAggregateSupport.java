@@ -54,7 +54,8 @@ public final class GpuOverAggregateSupport {
     static final int ADDITIONS_PER_ROW = 1;
 
     /** Costs an {@code OVER} window, or says why it cannot be accumulated on a device. */
-    public static RowCost estimate(OverSpec overSpec, RowType inputType, RowType outputType) {
+    public static RowCost estimate(
+            OverSpec overSpec, RowType inputType, RowType outputType, long estimatedRows) {
         if (overSpec.getPartition().getFieldIndices().length != 0) {
             // A partitioned running total is a segmented scan, which is a different primitive and
             // one this project has neither bound nor measured.
@@ -97,9 +98,11 @@ public final class GpuOverAggregateSupport {
         int[] ops = new int[AccelFunction.values().length];
         ops[AccelFunction.PLUS.ordinal()] = ADDITIONS_PER_ROW;
         int inWidth = rowWidth(inputType);
+        // Carried even though this node needs no cardinality of its own: a subtree's profile
+        // merges to UNKNOWN_ROWS if any member is unknown, and this node sits directly above the
+        // Sort its own ORDER BY created -- which does need one.
         return RowCost.of(
-                new AccelWorkProfile(
-                        ops, inWidth, rowWidth(outputType), AccelWorkProfile.UNKNOWN_ROWS));
+                new AccelWorkProfile(ops, inWidth, rowWidth(outputType), estimatedRows));
     }
 
     /** Which input field the single {@code SUM} accumulates, when {@link #estimate} allowed it. */
