@@ -262,6 +262,11 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
             }
 
             @Override
+            public long stagingBytes() {
+                return arena == null ? 0L : arena.reservedBytes();
+            }
+
+            @Override
             public ByteBuffer allocateOffHeap(int bytes) {
                 if (arena == null) {
                     throw new IllegalStateException(

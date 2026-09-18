@@ -83,4 +83,22 @@ public interface AcceleratorContext {
      * @throws IllegalStateException if the budget cannot cover the request
      */
     ByteBuffer allocateOffHeap(int bytes);
+
+    /**
+     * Total bytes {@link #allocateOffHeap} can hand out, or 0 where nothing was reserved.
+     *
+     * <p>{@link #maxBatchSize} answers the question a per-row operator asks — how many rows may be
+     * in flight at once — and it is capped by the configured batch size, because a Calc that stages
+     * more than that gains nothing. An operator that must hold its <em>whole</em> input is asking a
+     * different question: not how large a batch may be, but how large an input it can undertake to
+     * keep. A sort is the first of those, and the configured batch size is the wrong bound for it —
+     * sorting a batch at a time gives sorted runs that still have to be merged.
+     *
+     * <p>So this reports the reservation itself and lets the provider divide by whatever a row
+     * costs in its own layout, which Flink does not know. Zero is ordinary and means the same thing
+     * {@link #providesOffHeap} returning false means: allocate privately, or decline.
+     */
+    default long stagingBytes() {
+        return 0L;
+    }
 }
