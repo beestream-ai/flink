@@ -22,6 +22,7 @@ import org.apache.flink.FlinkVersion;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
+import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
@@ -41,6 +42,11 @@ import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeContext;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeMetadata;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
+import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
+import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
+import org.apache.flink.table.planner.plan.gpu.GpuOverAggregateSupport;
+import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.OverSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.OverSpec.GroupSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
@@ -65,6 +71,8 @@ import org.apache.flink.table.runtime.operators.over.frame.RowSlidingOverFrame;
 import org.apache.flink.table.runtime.operators.over.frame.RowUnboundedFollowingOverFrame;
 import org.apache.flink.table.runtime.operators.over.frame.RowUnboundedPrecedingOverFrame;
 import org.apache.flink.table.runtime.operators.over.frame.UnboundedOverWindowFrame;
+import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
+import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -79,6 +87,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 
 /** Batch {@link ExecNode} for sort-based over window aggregate. */
 @ExecNodeMetadata(
@@ -212,11 +221,62 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
         return ExecNodeUtil.createOneInputTransformation(
                 inputTransform,
                 createTransformationMeta(OVER_TRANSFORMATION, config),
-                SimpleOperatorFactory.of(operator),
+                substitute(config, inputType, SimpleOperatorFactory.of(operator)),
                 InternalTypeInfo.of(getOutputType()),
                 inputTransform.getParallelism(),
                 managedMemory,
                 false);
+    }
+
+    /**
+     * Offers the window to an accelerator, or returns Flink's own operator unchanged.
+     *
+     * <p>The seam the Calc and the sort have, and the operator being replaced is the Calc's kind
+     * rather than the sort's: an unbounded-preceding running total is served a batch at a time,
+     * carrying one number between batches, so {@code GpuOrCpuCalcOperatorFactory} is the right
+     * factory and not a third one. What is being replaced is {@code NonBufferOverWindowOperator},
+     * which is Flink's cheap path — it buffers nothing and reserves no managed memory — and that
+     * is worth knowing before reading any speedup from this node.
+     */
+    private StreamOperatorFactory<RowData> substitute(
+            ExecNodeConfig config, RowType inputType, StreamOperatorFactory<RowData> onCpu) {
+        GpuOffloadAssignment assignment = getGpuOffloadAssignment();
+        if (assignment == null || !assignment.isOffloaded() || config.isCompiled()) {
+            // M4.4: a compiled plan does not offload.
+            return onCpu;
+        }
+        Optional<AccelNode> subtree =
+                AccelIrBuilder.buildOverAggregate(
+                        overSpec, inputType, (RowType) getOutputType());
+        if (!subtree.isPresent()) {
+            return onCpu;
+        }
+        AcceleratedCalcSpec spec =
+                new AcceleratedCalcSpec(
+                        subtree.get(),
+                        assignment.verdict().work(),
+                        (RowType) getOutputType(),
+                        config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE),
+                        config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
+        return new GpuOrCpuCalcOperatorFactory(spec, onCpu);
+    }
+
+    /**
+     * An {@code OVER} window is offloadable in principle; {@link #estimateRowCost()} decides
+     * whether this one is.
+     *
+     * <p>Most are not, and the refusals are in the estimate so the reason reaches {@code EXPLAIN}:
+     * one frame of one shape over one column is what the binding serves.
+     */
+    @Override
+    public boolean supportGpuOffload() {
+        return true;
+    }
+
+    @Override
+    public RowCost estimateRowCost() {
+        RowType inputType = (RowType) getInputEdges().get(0).getOutputType();
+        return GpuOverAggregateSupport.estimate(overSpec, inputType, (RowType) getOutputType());
     }
 
     private List<OverWindowFrame> createOverWindowFrames(

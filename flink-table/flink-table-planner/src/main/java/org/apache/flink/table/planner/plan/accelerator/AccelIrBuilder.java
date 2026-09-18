@@ -27,6 +27,7 @@ import org.apache.flink.table.accelerator.AccelFilter;
 import org.apache.flink.table.accelerator.AccelFunction;
 import org.apache.flink.table.accelerator.AccelInput;
 import org.apache.flink.table.accelerator.AccelJoin;
+import org.apache.flink.table.accelerator.AccelOverAggregate;
 import org.apache.flink.table.accelerator.AccelInputRef;
 import org.apache.flink.table.accelerator.AccelLiteral;
 import org.apache.flink.table.accelerator.AccelNode;
@@ -39,7 +40,9 @@ import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
 import org.apache.flink.table.planner.plan.gpu.GpuJoinSupport;
+import org.apache.flink.table.planner.plan.gpu.GpuOverAggregateSupport;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.JoinSpec;
+import org.apache.flink.table.planner.plan.nodes.exec.spec.OverSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
@@ -61,6 +64,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.Map;
 import java.util.Optional;
 
@@ -247,6 +251,24 @@ public final class AccelIrBuilder {
      * and not the order the query wrote them; {@code buildIsLeft} carries the query's order, which
      * the output row still follows.
      */
+    /**
+     * Builds the IR for a running total, or empty where the shape is not describable.
+     *
+     * <p>{@link GpuOverAggregateSupport#estimate} has already refused everything this cannot
+     * express by the time this is called; the check here is the one that survives being called
+     * from somewhere else.
+     */
+    public static Optional<AccelNode> buildOverAggregate(
+            OverSpec overSpec, RowType inputType, RowType outputType) {
+        OptionalInt valueField = GpuOverAggregateSupport.valueFieldOf(overSpec);
+        if (!valueField.isPresent() || valueField.getAsInt() >= inputType.getFieldCount()) {
+            return Optional.empty();
+        }
+        return Optional.of(
+                new AccelOverAggregate(
+                        valueField.getAsInt(), new AccelInput(inputType), outputType));
+    }
+
     public static Optional<AccelNode> buildJoin(
             JoinSpec joinSpec,
             RowType buildType,

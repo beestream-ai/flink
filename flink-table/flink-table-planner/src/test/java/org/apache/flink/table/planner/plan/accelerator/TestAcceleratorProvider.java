@@ -24,6 +24,7 @@ import org.apache.flink.table.accelerator.AccelAggregate;
 import org.apache.flink.table.accelerator.AccelIrVersion;
 import org.apache.flink.table.accelerator.AccelJoin;
 import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.accelerator.AccelOverAggregate;
 import org.apache.flink.table.accelerator.AccelSort;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.data.RowData;
@@ -80,6 +81,16 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
     public static final java.util.concurrent.atomic.AtomicBoolean LAST_WAS_JOIN =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
+    /**
+     * How many OVER windows have been accepted since {@link #enable}.
+     *
+     * <p>A count rather than a {@code LAST_WAS_} flag, because a query with an {@code ORDER BY}
+     * inside its {@code OVER} offers <em>two</em> offloadable nodes — the window and the sort
+     * beneath it — and whichever is offered second overwrites a flag. That is not hypothetical:
+     * it is every query this node serves.
+     */
+    public static final AtomicInteger OVER_PLANS_OFFERED = new AtomicInteger();
+
     /** Times {@link #accept} returned a plan. */
     public static final AtomicInteger PLANS_OFFERED = new AtomicInteger();
 
@@ -102,6 +113,7 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
         speedup = claimedSpeedup;
         ROWS_PROCESSED.set(0);
         PLANS_OFFERED.set(0);
+        OVER_PLANS_OFFERED.set(0);
     }
 
     /** Makes the accelerated operator fail in {@code open()}, as a lost device would. */
@@ -117,6 +129,7 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
         LAST_WAS_AGGREGATE.set(false);
         LAST_WAS_SORT.set(false);
         LAST_WAS_JOIN.set(false);
+        OVER_PLANS_OFFERED.set(0);
     }
 
     /** Makes the interpreter compute TIMES as addition, to prove the harness can detect it. */
@@ -140,7 +153,9 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
             return Optional.empty();
         }
         boolean interpretable;
-        if (subtree instanceof AccelSort || subtree instanceof AccelJoin) {
+        if (subtree instanceof AccelSort
+                || subtree instanceof AccelJoin
+                || subtree instanceof AccelOverAggregate) {
             // A sort names a key and a join names an equality; neither says anything about
             // expressions, so there is nothing for the interpreter to be able or unable to
             // evaluate.
@@ -157,6 +172,9 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
         LAST_WAS_AGGREGATE.set(subtree instanceof AccelAggregate);
         LAST_WAS_SORT.set(subtree instanceof AccelSort);
         LAST_WAS_JOIN.set(subtree instanceof AccelJoin);
+        if (subtree instanceof AccelOverAggregate) {
+            OVER_PLANS_OFFERED.incrementAndGet();
+        }
         return Optional.of(new Plan(subtree, new AcceleratorCost(speedup, 0L, 0L)));
     }
 
@@ -170,6 +188,11 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
             return SimpleOperatorFactory.of(
                     new AccelSortInterpreterOperator(
                             (AccelSort) subtree, context.outputType(), ROWS_PROCESSED));
+        }
+        if (subtree instanceof AccelOverAggregate) {
+            return SimpleOperatorFactory.of(
+                    new AccelOverAggregateInterpreterOperator(
+                            (AccelOverAggregate) subtree, context.outputType(), ROWS_PROCESSED));
         }
         if (subtree instanceof AccelJoin) {
             return SimpleOperatorFactory.of(

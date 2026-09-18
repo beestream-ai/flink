@@ -88,7 +88,17 @@ public final class AccelIrVersion {
      */
     public static final int V6 = 6;
 
-    public static final int CURRENT = V6;
+    /**
+     * Adds {@link AccelOverAggregate}.
+     *
+     * <p>A V6 provider never sees one, and here the bump is the mildest of the set: the node is
+     * one-input, batchable and per-row in everything but the number it carries between batches, so
+     * a provider meeting it unprepared would merely lack a rendering. It is bumped anyway because
+     * the alternative is deciding, per node kind, how much surprise is tolerable.
+     */
+    public static final int V7 = 7;
+
+    public static final int CURRENT = V7;
 
     private AccelIrVersion() {}
 }
