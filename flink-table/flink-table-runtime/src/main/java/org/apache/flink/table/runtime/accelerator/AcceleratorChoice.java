@@ -143,10 +143,20 @@ public final class AcceleratorChoice {
         if (estimatedRows == AccelWorkProfile.UNKNOWN_ROWS || cost.fixedCostNanos() == 0) {
             return true;
         }
-        // One nanosecond per operation per row is a stand-in for the CPU's rate, used only to ask
-        // whether the saving is of the same order as the setup. It is not a calibration: the
-        // comparison it feeds is between "roughly repays" and "obviously does not".
-        double cpuNanos = (double) estimatedRows * Math.max(1, work.totalOpsPerRow());
+        // The provider's own measured rate where it has one, and the stand-in otherwise.
+        //
+        // The stand-in is one nanosecond per counted operation per row, used only to ask whether
+        // the saving is of the same order as the setup. It is not a calibration, and for anything
+        // but arithmetic it is not even the right order: a sort's counted operations are
+        // comparisons inside a key-normalising, spilling sorter, which measure about twenty
+        // nanoseconds each rather than one. Priced at the stand-in, a 4M-row sort claims to save
+        // 76 ms against 300 ms of setup and is refused -- while the operator it was refused in
+        // favour of takes 1.9 seconds.
+        double cpuNanosPerRow =
+                cost.cpuNanosPerRow() > 0.0
+                        ? cost.cpuNanosPerRow()
+                        : Math.max(1, work.totalOpsPerRow());
+        double cpuNanos = (double) estimatedRows * cpuNanosPerRow;
         double saved = cpuNanos * (1.0 - 1.0 / cost.speedupOverCpu());
         return saved > cost.fixedCostNanos();
     }
