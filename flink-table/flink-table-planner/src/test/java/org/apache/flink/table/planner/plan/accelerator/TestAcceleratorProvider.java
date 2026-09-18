@@ -22,6 +22,7 @@ import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.table.accelerator.AccelAggregate;
 import org.apache.flink.table.accelerator.AccelIrVersion;
+import org.apache.flink.table.accelerator.AccelJoin;
 import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.accelerator.AccelSort;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
@@ -75,6 +76,10 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
     public static final java.util.concurrent.atomic.AtomicBoolean LAST_WAS_SORT =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
+    /** Whether the last subtree offered was a join — the two-input seam. */
+    public static final java.util.concurrent.atomic.AtomicBoolean LAST_WAS_JOIN =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     /** Times {@link #accept} returned a plan. */
     public static final AtomicInteger PLANS_OFFERED = new AtomicInteger();
 
@@ -111,6 +116,7 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
         AccelInterpreter.corrupt = false;
         LAST_WAS_AGGREGATE.set(false);
         LAST_WAS_SORT.set(false);
+        LAST_WAS_JOIN.set(false);
     }
 
     /** Makes the interpreter compute TIMES as addition, to prove the harness can detect it. */
@@ -134,9 +140,10 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
             return Optional.empty();
         }
         boolean interpretable;
-        if (subtree instanceof AccelSort) {
-            // A sort names a key and says nothing about expressions, so there is nothing for the
-            // interpreter to be able or unable to evaluate.
+        if (subtree instanceof AccelSort || subtree instanceof AccelJoin) {
+            // A sort names a key and a join names an equality; neither says anything about
+            // expressions, so there is nothing for the interpreter to be able or unable to
+            // evaluate.
             interpretable = true;
         } else if (subtree instanceof AccelAggregate) {
             interpretable = AccelInterpreter.canInterpret(subtree.inputs().get(0));
@@ -149,6 +156,7 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
         PLANS_OFFERED.incrementAndGet();
         LAST_WAS_AGGREGATE.set(subtree instanceof AccelAggregate);
         LAST_WAS_SORT.set(subtree instanceof AccelSort);
+        LAST_WAS_JOIN.set(subtree instanceof AccelJoin);
         return Optional.of(new Plan(subtree, new AcceleratorCost(speedup, 0L, 0L)));
     }
 
@@ -162,6 +170,11 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
             return SimpleOperatorFactory.of(
                     new AccelSortInterpreterOperator(
                             (AccelSort) subtree, context.outputType(), ROWS_PROCESSED));
+        }
+        if (subtree instanceof AccelJoin) {
+            return SimpleOperatorFactory.of(
+                    new AccelJoinInterpreterOperator(
+                            (AccelJoin) subtree, context.outputType(), ROWS_PROCESSED));
         }
         if (subtree instanceof AccelAggregate) {
             return SimpleOperatorFactory.of(

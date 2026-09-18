@@ -179,13 +179,18 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
                     // give it back. Staging holds the slot's whole operator share of managed
                     // memory, and the generated operator this falls back to wants managed memory
                     // of its own -- a hash table, a sorter -- so the two cannot both hold it.
-                    ManagedOffHeapArena staging = reserveStagingMemory(spec, parameters);
+                    ManagedOffHeapArena staging = AcceleratorSetup.reserveStaging(spec, parameters);
                     StreamOperatorFactory<RowData> built =
                             accelerator
                                     .get()
                                     .createOperator(
                                             outcome.plan().get(),
-                                            contextFor(spec, loader, parameters, staging));
+                                            AcceleratorSetup.contextFor(
+                                                    spec.outputType(),
+                                                    spec.maxBatchSize(),
+                                                    bytesPerRowOf(spec),
+                                                    loader,
+                                                    staging));
                     built.setChainingStrategy(getChainingStrategy());
                     if (built instanceof ProcessingTimeServiceAware) {
                         ((ProcessingTimeServiceAware) built)
@@ -219,113 +224,17 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
     }
 
     /**
-     * What this machine tells the provider about the task it is being built into.
-     *
-     * <p>The batch size is the part worth reading. Until M3.1 it was whatever {@code
-     * table.exec.accelerator.batch-size} said, which is a number chosen once, in a config file, by
-     * someone who could not know how much memory the slot running this task would have or how wide
-     * its rows would be. It is now a <em>ceiling</em>: the operator asks the slot what it has,
-     * works out how many rows of this width fit, and takes the smaller of the two.
-     *
-     * <p>Where there is no budget — a plan built before the transformation declared managed memory,
-     * or a test harness with no slot behind it — the configured value stands and the provider
-     * allocates privately. That is what happened before, and it is a safe degradation rather than a
-     * failure.
-     */
-    private static AcceleratorContext contextFor(
-            AcceleratedCalcSpec spec,
-            ClassLoader loader,
-            StreamOperatorParameters<RowData> parameters,
-            @Nullable ManagedOffHeapArena arena) {
-
-        final int batchSize = batchSizeFor(spec, arena);
-
-        return new AcceleratorContext() {
-            @Override
-            public RowType outputType() {
-                return spec.outputType();
-            }
-
-            @Override
-            public int maxBatchSize() {
-                return batchSize;
-            }
-
-            @Override
-            public ClassLoader userCodeClassLoader() {
-                return loader;
-            }
-
-            @Override
-            public boolean providesOffHeap() {
-                return arena != null;
-            }
-
-            @Override
-            public long stagingBytes() {
-                return arena == null ? 0L : arena.reservedBytes();
-            }
-
-            @Override
-            public ByteBuffer allocateOffHeap(int bytes) {
-                if (arena == null) {
-                    throw new IllegalStateException(
-                            "no managed memory was reserved for this operator, so the provider"
-                                    + " must allocate its own staging");
-                }
-                return arena.allocate(bytes);
-            }
-        };
-    }
-
-    /**
-     * Reserves the slot's share of managed memory for this operator, or null if there is none.
-     *
-     * <p>Registered with the task's cancelables rather than closed by the operator: a cancelled
-     * task must give its memory back, and an operator cancelled before {@code close} would
-     * otherwise hold it for the life of the slot.
-     */
-    private static @Nullable ManagedOffHeapArena reserveStagingMemory(
-            AcceleratedCalcSpec spec, StreamOperatorParameters<RowData> parameters) {
-        try {
-            Environment environment = parameters.getContainingTask().getEnvironment();
-            MemoryManager memoryManager = environment.getMemoryManager();
-            double fraction =
-                    parameters
-                            .getStreamConfig()
-                            .getManagedMemoryFractionOperatorUseCaseOfSlot(
-                                    ManagedMemoryUseCase.OPERATOR,
-                                    environment.getJobConfiguration(),
-                                    environment.getTaskManagerInfo().getConfiguration(),
-                                    environment.getUserCodeClassLoader().asClassLoader());
-            long budget = memoryManager.computeMemorySize(fraction);
-
-            Optional<ManagedOffHeapArena> arena =
-                    ManagedOffHeapArena.reserve(memoryManager, spec, budget);
-            if (!arena.isPresent()) {
-                LOG.info(
-                        "No managed memory for accelerated staging (budget {} bytes); the provider"
-                                + " allocates its own and the configured batch size stands",
-                        budget);
-                return null;
-            }
-            parameters.getContainingTask().getCancelables().registerCloseable(arena.get());
-            return arena.get();
-        } catch (Throwable t) {
-            // Reserving improves the accounting; it is never a precondition for running.
-            LOG.info("Could not reserve managed memory for accelerated staging ({})", t.toString());
-            return null;
-        }
-    }
-
-    /**
      * The staging width one row costs, for whoever is turning bytes into rows.
      *
      * <p>Exposed for {@code AcceleratorCardinalityStrategy}, which has an exact byte count and
-     * needs a row count. Input plus output, the same figure {@link #batchSizeFor} sizes the arena
+     * needs a row count. Input plus output, the same figure {@link AcceleratorSetup#batchSizeFor} sizes the arena
      * with.
      */
     public int bytesPerRow() {
+        return bytesPerRowOf(spec);
+    }
+
+    private static int bytesPerRowOf(AcceleratedCalcSpec spec) {
         return Math.max(1, spec.work().inputBytesPerRow() + spec.work().outputBytesPerRow());
     }
 
@@ -341,7 +250,7 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
      * <p>Deliberately not a new configuration key. The batch size is already the number the
      * operator is sized against, and inventing a second threshold would mean two knobs that have to
      * agree. The ceiling is used rather than the memory-derived batch size of {@link
-     * #batchSizeFor}: the real batch can only be smaller, so this errs toward the CPU, which is the
+     * AcceleratorSetup#batchSizeFor}: the real batch can only be smaller, so this errs toward the CPU, which is the
      * side that is always correct.
      *
      * <p>Silent when nothing measured the input. No measurement means no blocking exchange feeding
@@ -370,24 +279,6 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
      */
     private long rowsToDecideOn() {
         return cardinality == null ? spec.work().estimatedRows() : cardinality.rowsPerSubtask;
-    }
-
-    /** The configured ceiling, or what the reserved budget actually fits, whichever is smaller. */
-    private static int batchSizeFor(AcceleratedCalcSpec spec, @Nullable ManagedOffHeapArena arena) {
-        if (arena == null) {
-            return spec.maxBatchSize();
-        }
-        int bytesPerRow =
-                Math.max(1, spec.work().inputBytesPerRow() + spec.work().outputBytesPerRow());
-        long fits = arena.reservedBytes() / bytesPerRow;
-        int batchSize = (int) Math.max(1, Math.min(spec.maxBatchSize(), fits));
-        LOG.info(
-                "Accelerated staging: {} bytes reserved, {} a row, batch size {} (ceiling {})",
-                arena.reservedBytes(),
-                bytesPerRow,
-                batchSize,
-                spec.maxBatchSize());
-        return batchSize;
     }
 
     private <T extends StreamOperator<RowData>> T codeGenerated(

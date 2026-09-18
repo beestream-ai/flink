@@ -38,6 +38,10 @@ import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeContext;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeMetadata;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTranslator;
+import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
+import org.apache.flink.table.planner.plan.gpu.GpuJoinSupport;
+import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
+import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.JoinSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.planner.plan.utils.HashJoinOperatorUtil;
@@ -45,6 +49,10 @@ import org.apache.flink.table.planner.plan.utils.JoinUtil;
 import org.apache.flink.table.planner.plan.utils.OperatorType;
 import org.apache.flink.table.runtime.generated.GeneratedJoinCondition;
 import org.apache.flink.table.runtime.operators.join.FlinkJoinType;
+import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
+import org.apache.flink.table.runtime.accelerator.AcceleratedJoinSpec;
+import org.apache.flink.table.runtime.gpu.GpuOrCpuJoinOperatorFactory;
 import org.apache.flink.table.runtime.operators.join.HashJoinType;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -55,6 +63,7 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonPro
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.IntStream;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
@@ -233,15 +242,89 @@ public class BatchExecHashJoin extends ExecNodeBase<RowData>
             probeTransform = leftInputTransform;
         }
 
+        RowType buildType = leftIsBuild ? leftType : rightType;
+        RowType probeType = leftIsBuild ? rightType : leftType;
+
         return ExecNodeUtil.createTwoInputTransformation(
                 buildTransform,
                 probeTransform,
                 createTransformationMeta(BatchExecHashJoin.JOIN_TRANSFORMATION, config),
-                operator,
+                substitute(config, buildType, probeType, operator),
                 InternalTypeInfo.of(getOutputType()),
                 probeTransform.getParallelism(),
                 managedMemory,
                 false);
+    }
+
+    /**
+     * Offers the join to an accelerator, or returns Flink's own join operator unchanged.
+     *
+     * <p>The same seam the Calc and the sort have, with one thing neither of them had to say: the
+     * inputs are handed over in <em>build, probe</em> order, which is the order the transformation
+     * puts them in and not the order the query wrote them. Which side is which is a costing
+     * decision this node already made, and a provider has no business remaking it.
+     */
+    private StreamOperatorFactory<RowData> substitute(
+            ExecNodeConfig config,
+            RowType buildType,
+            RowType probeType,
+            StreamOperatorFactory<RowData> onCpu) {
+        GpuOffloadAssignment assignment = getGpuOffloadAssignment();
+        if (assignment == null || !assignment.isOffloaded() || config.isCompiled()) {
+            // M4.4: a compiled plan does not offload, and a join is no exception.
+            return onCpu;
+        }
+        long buildRows = leftIsBuild ? estimatedLeftRowCount : estimatedRightRowCount;
+        Optional<AccelNode> subtree =
+                AccelIrBuilder.buildJoin(
+                        joinSpec,
+                        buildType,
+                        probeType,
+                        (RowType) getOutputType(),
+                        leftIsBuild,
+                        buildRows);
+        if (!subtree.isPresent()) {
+            return onCpu;
+        }
+        AcceleratedJoinSpec spec =
+                new AcceleratedJoinSpec(
+                        subtree.get(),
+                        assignment.verdict().work(),
+                        (RowType) getOutputType(),
+                        config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE),
+                        config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
+        return new GpuOrCpuJoinOperatorFactory(spec, onCpu);
+    }
+
+    /**
+     * A shuffle join is offloadable in principle; {@link #estimateRowCost()} decides whether this
+     * one is.
+     *
+     * <p>A broadcast join is not, and it is refused in the estimate rather than here so the reason
+     * reaches {@code EXPLAIN} instead of the node simply going quiet.
+     */
+    @Override
+    public boolean supportGpuOffload() {
+        return true;
+    }
+
+    @Override
+    public RowCost estimateRowCost() {
+        RowType leftType = (RowType) getInputEdges().get(0).getOutputType();
+        RowType rightType = (RowType) getInputEdges().get(1).getOutputType();
+        RowType buildType = leftIsBuild ? leftType : rightType;
+        RowType probeType = leftIsBuild ? rightType : leftType;
+        long buildRows = Math.max(0L, leftIsBuild ? estimatedLeftRowCount : estimatedRightRowCount);
+        long probeRows = Math.max(0L, leftIsBuild ? estimatedRightRowCount : estimatedLeftRowCount);
+        return GpuJoinSupport.estimate(
+                joinSpec,
+                buildType,
+                probeType,
+                (RowType) getOutputType(),
+                leftIsBuild,
+                isBroadcast,
+                buildRows,
+                probeRows);
     }
 
     @Override

@@ -26,6 +26,7 @@ import org.apache.flink.table.accelerator.AccelExpression;
 import org.apache.flink.table.accelerator.AccelFilter;
 import org.apache.flink.table.accelerator.AccelFunction;
 import org.apache.flink.table.accelerator.AccelInput;
+import org.apache.flink.table.accelerator.AccelJoin;
 import org.apache.flink.table.accelerator.AccelInputRef;
 import org.apache.flink.table.accelerator.AccelLiteral;
 import org.apache.flink.table.accelerator.AccelNode;
@@ -37,6 +38,8 @@ import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
+import org.apache.flink.table.planner.plan.gpu.GpuJoinSupport;
+import org.apache.flink.table.planner.plan.nodes.exec.spec.JoinSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
@@ -235,6 +238,34 @@ public final class AccelIrBuilder {
                         field.getNullIsLast(),
                         new AccelInput(inputType),
                         inputType));
+    }
+
+    /**
+     * Builds the IR for an inner equi-join, or empty where the shape is not describable.
+     *
+     * <p>Takes its inputs in build/probe order, which is the order the transformation puts them in
+     * and not the order the query wrote them; {@code buildIsLeft} carries the query's order, which
+     * the output row still follows.
+     */
+    public static Optional<AccelNode> buildJoin(
+            JoinSpec joinSpec,
+            RowType buildType,
+            RowType probeType,
+            RowType outputType,
+            boolean buildIsLeft,
+            long estimatedBuildRows) {
+        if (joinSpec.getLeftKeys().length != 1 || joinSpec.getRightKeys().length != 1) {
+            return Optional.empty();
+        }
+        return Optional.of(
+                new AccelJoin(
+                        GpuJoinSupport.buildKeyOf(joinSpec, buildIsLeft),
+                        GpuJoinSupport.probeKeyOf(joinSpec, buildIsLeft),
+                        buildIsLeft,
+                        estimatedBuildRows,
+                        new AccelInput(buildType),
+                        new AccelInput(probeType),
+                        outputType));
     }
 
     public static Optional<AccelNode> buildAggregate(

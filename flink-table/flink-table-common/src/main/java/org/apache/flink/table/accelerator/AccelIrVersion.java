@@ -76,7 +76,19 @@ public final class AccelIrVersion {
      */
     public static final int V5 = 5;
 
-    public static final int CURRENT = V5;
+    /**
+     * Adds {@link AccelJoin}, and with it the first node that has two inputs.
+     *
+     * <p>The bump matters for a reason the node kind alone does not say. Every version before this
+     * one describes a subtree a provider serves with a one-input operator, and the SPI's {@code
+     * createOperator} returns a factory that Flink has until now only ever built a {@code
+     * OneInputStreamOperator} from. A V5 provider handed this would return the wrong <em>kind</em>
+     * of operator, and the failure would be a class cast in the middle of building a JobGraph
+     * rather than anything about accelerators.
+     */
+    public static final int V6 = 6;
+
+    public static final int CURRENT = V6;
 
     private AccelIrVersion() {}
 }
