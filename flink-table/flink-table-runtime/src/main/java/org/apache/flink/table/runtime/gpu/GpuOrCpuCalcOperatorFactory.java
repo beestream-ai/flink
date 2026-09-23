@@ -20,11 +20,8 @@ package org.apache.flink.table.runtime.gpu;
 
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.core.memory.ManagedMemoryUseCase;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.groups.OperatorMetricGroup;
-import org.apache.flink.runtime.execution.Environment;
-import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -33,21 +30,19 @@ import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeServiceAware;
+import org.apache.flink.table.accelerator.AcceleratorDeclineReason;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
 import org.apache.flink.table.runtime.accelerator.AcceleratorChoice;
-import org.apache.flink.table.runtime.accelerator.AcceleratorContext;
 import org.apache.flink.table.runtime.accelerator.AcceleratorProvider;
 import org.apache.flink.table.runtime.accelerator.AcceleratorProviders;
 import org.apache.flink.table.runtime.accelerator.ManagedOffHeapArena;
-import org.apache.flink.table.types.logical.RowType;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
-import java.nio.ByteBuffer;
 import java.util.Optional;
 
 /**
@@ -108,10 +103,26 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
      */
     private @Nullable RuntimeCardinality cardinality;
 
+    /**
+     * The parallelism above which this declines rather than offloading.
+     *
+     * <p>Carried on the factory because the planner knows the configuration and the TaskManager
+     * knows the parallelism, and the decision needs both.
+     */
+    private final int maxParallelism;
+
     public GpuOrCpuCalcOperatorFactory(
             AcceleratedCalcSpec spec, StreamOperatorFactory<RowData> cpuFactory) {
+        this(spec, cpuFactory, 1);
+    }
+
+    public GpuOrCpuCalcOperatorFactory(
+            AcceleratedCalcSpec spec,
+            StreamOperatorFactory<RowData> cpuFactory,
+            int maxParallelism) {
         this.spec = spec;
         this.cpuFactory = cpuFactory;
+        this.maxParallelism = maxParallelism;
     }
 
     /**
@@ -157,6 +168,17 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
     public <T extends StreamOperator<RowData>> T createStreamOperator(
             StreamOperatorParameters<RowData> parameters) {
         try {
+            String retry = retryAttempt(parameters);
+            if (retry != null) {
+                return codeGenerated(parameters, AcceleratorDeclineReason.RETRY_ATTEMPT, retry);
+            }
+            String tooParallel = aboveSupportedParallelism(parameters, maxParallelism);
+            if (tooParallel != null) {
+                return codeGenerated(
+                        parameters,
+                        AcceleratorDeclineReason.PARALLELISM_ABOVE_SUPPORTED,
+                        tooParallel);
+            }
             ClassLoader loader = parameters.getContainingTask().getUserCodeClassLoader();
 
             // The accelerator SPI first. It is the one that asks a provider what its device would
@@ -165,7 +187,7 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
             if (accelerator.isPresent()) {
                 String tooFew = tooFewRowsToBother();
                 if (tooFew != null) {
-                    return codeGenerated(parameters, tooFew);
+                    return codeGenerated(parameters, AcceleratorDeclineReason.TOO_FEW_ROWS, tooFew);
                 }
                 AcceleratorChoice.Outcome outcome =
                         AcceleratorChoice.choose(
@@ -210,16 +232,20 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
                                     staging);
                     @SuppressWarnings("unchecked")
                     T operator = (T) guarded;
-                    return report(operator, guarded, outcome.reason());
+                    return report(operator, guarded, outcome.code(), outcome.reason());
                 }
-                return codeGenerated(parameters, outcome.reason());
+                return codeGenerated(parameters, outcome.code(), outcome.reason());
             }
 
             return codeGenerated(
-                    parameters, "no accelerator provider on this TaskManager's classpath");
+                    parameters,
+                    AcceleratorDeclineReason.NO_PROVIDER,
+                    "no accelerator provider on this TaskManager's classpath");
         } catch (Throwable t) {
             return codeGenerated(
-                    parameters, "accelerator operator could not be created (" + t + ")");
+                    parameters,
+                    AcceleratorDeclineReason.OPERATOR_CREATION_FAILED,
+                    "accelerator operator could not be created (" + t + ")");
         }
     }
 
@@ -227,8 +253,8 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
      * The staging width one row costs, for whoever is turning bytes into rows.
      *
      * <p>Exposed for {@code AcceleratorCardinalityStrategy}, which has an exact byte count and
-     * needs a row count. Input plus output, the same figure {@link AcceleratorSetup#batchSizeFor} sizes the arena
-     * with.
+     * needs a row count. Input plus output, the same figure {@link AcceleratorSetup#batchSizeFor}
+     * sizes the arena with.
      */
     public int bytesPerRow() {
         return bytesPerRowOf(spec);
@@ -250,8 +276,8 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
      * <p>Deliberately not a new configuration key. The batch size is already the number the
      * operator is sized against, and inventing a second threshold would mean two knobs that have to
      * agree. The ceiling is used rather than the memory-derived batch size of {@link
-     * AcceleratorSetup#batchSizeFor}: the real batch can only be smaller, so this errs toward the CPU, which is the
-     * side that is always correct.
+     * AcceleratorSetup#batchSizeFor}: the real batch can only be smaller, so this errs toward the
+     * CPU, which is the side that is always correct.
      *
      * <p>Silent when nothing measured the input. No measurement means no blocking exchange feeding
      * this node -- a chained source, most often -- and a planner estimate is not evidence enough to
@@ -282,11 +308,95 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
     }
 
     private <T extends StreamOperator<RowData>> T codeGenerated(
-            StreamOperatorParameters<RowData> parameters, String reason) {
+            StreamOperatorParameters<RowData> parameters,
+            AcceleratorDeclineReason code,
+            String reason) {
         LOG.info(
                 "Accelerator declined on this TaskManager, running the generated CPU operator: {}",
                 reason);
-        return report(cpuFactory.createStreamOperator(parameters), null, reason);
+        return report(cpuFactory.createStreamOperator(parameters), null, code, reason);
+    }
+
+    /**
+     * Refuses a retried attempt, or null on the first one.
+     *
+     * <p>A device failure that has already killed an attempt is usually deterministic: a kernel
+     * that will not compile on this machine, a driver in a state a restart does not clear, a
+     * partition larger than the provider undertook to hold. Batch failover re-runs the task on the
+     * same path, rediscovers the same fact, and spends the job's whole restart budget doing it
+     * before failing the job -- when a CPU implementation that would have finished was sitting in
+     * the JobGraph the whole time.
+     *
+     * <p>Deliberately not conditioned on <em>why</em> the previous attempt died. A task is retried
+     * for reasons that have nothing to do with the accelerator -- a lost TaskManager, an upstream
+     * failure -- and declining in those cases costs one slow attempt. Distinguishing them needs a
+     * failure cause to survive into the next attempt, which is a scheduler-side change; until then
+     * the conservative reading is the one that cannot lose a job.
+     */
+    static @Nullable String retryAttempt(StreamOperatorParameters<RowData> parameters) {
+        try {
+            return retryAttempt(
+                    parameters
+                            .getContainingTask()
+                            .getEnvironment()
+                            .getTaskInfo()
+                            .getAttemptNumber());
+        } catch (Throwable noTaskInfo) {
+            // A harness with no task behind it. Not knowing the attempt is not a reason to refuse.
+            return null;
+        }
+    }
+
+    /**
+     * Refuses a subtask whose parallelism is above what the accelerated path survives.
+     *
+     * <p>Containment for a failure whose cause is not established: repeated jobs at parallelism
+     * above 1 sharing one device fail intermittently with {@code CUDA_ERROR_LAUNCH_FAILED}, and
+     * device memory has been ruled out by measurement. Declining here is the contract's own answer
+     * to a configuration that cannot be admitted safely -- refuse before execution rather than fail
+     * during it -- and it is reversible by configuration once the cause is found.
+     */
+    static @Nullable String aboveSupportedParallelism(
+            StreamOperatorParameters<RowData> parameters, int limit) {
+        try {
+            int parallelism =
+                    parameters
+                            .getContainingTask()
+                            .getEnvironment()
+                            .getTaskInfo()
+                            .getNumberOfParallelSubtasks();
+            return aboveSupportedParallelism(parallelism, limit);
+        } catch (Throwable noTaskInfo) {
+            return null;
+        }
+    }
+
+    /** The rule itself, separated from where the number comes from so that it can be tested. */
+    static @Nullable String aboveSupportedParallelism(int parallelism, int limit) {
+        if (limit <= 0 || parallelism <= limit) {
+            return null;
+        }
+        return "subtask parallelism "
+                + parallelism
+                + " is above the "
+                + limit
+                + " the accelerated path is known to survive "
+                // Named rather than referenced: the option is declared in flink-table-api-java,
+                // which this module does not depend on and should not start depending on for a
+                // string.
+                + "(table.exec.accelerator.max-parallelism); running the generated operator"
+                + " instead";
+    }
+
+    /** The rule itself, separated from where the number comes from so that it can be tested. */
+    static @Nullable String retryAttempt(int attemptNumber) {
+        if (attemptNumber <= 0) {
+            return null;
+        }
+        return "attempt "
+                + attemptNumber
+                + " of this task: a previous attempt failed, and the accelerator is not offered "
+                + "the work again in case it was the cause";
     }
 
     /**
@@ -308,7 +418,10 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
      * line on the machine that made it.
      */
     private static <T extends StreamOperator<RowData>> T report(
-            T operator, @Nullable FallbackToCpuOperator guarded, String reason) {
+            T operator,
+            @Nullable FallbackToCpuOperator guarded,
+            AcceleratorDeclineReason code,
+            String reason) {
         try {
             OperatorMetricGroup metrics = operator.getMetricGroup();
             // Read through the guard rather than captured: a subtask that started on a device and
@@ -318,6 +431,12 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
                     ACCELERATED,
                     (Gauge<Integer>) () -> guarded != null && guarded.isAccelerated() ? 1 : 0);
             metrics.gauge(DECISION, (Gauge<String>) () -> reason);
+            // Read through the guard for the same reason the flag above is: a subtask that fell
+            // back mid-task must report the fallback point, not the verdict it started with.
+            metrics.gauge(
+                    DECISION_CODE,
+                    (Gauge<String>)
+                            () -> (guarded != null ? guarded.declineReason() : code).name());
         } catch (Throwable t) {
             // A metric is never worth failing a task for, and a harness may hand back an operator
             // with no metric group at all.
@@ -331,6 +450,15 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
 
     /** Why, in the words the decision was made in. */
     public static final String DECISION = "acceleratorDecision";
+
+    /**
+     * The same why, as one of a closed set of names, so that it can be counted.
+     *
+     * <p>{@link #DECISION} is for the person reading one subtask's line; this is for the dashboard
+     * asking what proportion of a cluster's subtasks decline for want of a device. See {@code
+     * AcceleratorDeclineReason}.
+     */
+    public static final String DECISION_CODE = "acceleratorDecisionCode";
 
     /**
      * Reports the code-generated operator's class, never the device one.

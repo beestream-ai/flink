@@ -28,6 +28,7 @@ import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.api.operators.TwoInputStreamOperator;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeServiceAware;
+import org.apache.flink.table.accelerator.AcceleratorDeclineReason;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.accelerator.AcceleratedJoinSpec;
 import org.apache.flink.table.runtime.accelerator.AcceleratorChoice;
@@ -61,15 +62,15 @@ import java.util.Optional;
  *   <li><b>The guard did.</b> {@link FallbackToCpuTwoInputOperator} covers a strictly narrower
  *       window, because a join has consumed its whole build side before the probe starts.
  *   <li><b>{@code InputSelectable} had to be honoured.</b> Flink reports the <em>generated</em>
- *       operator's class to the client, and {@code HashJoinOperator} is {@code InputSelectable};
- *       so whatever actually runs is asked for a selection, and an accelerated join that did not
+ *       operator's class to the client, and {@code HashJoinOperator} is {@code InputSelectable}; so
+ *       whatever actually runs is asked for a selection, and an accelerated join that did not
  *       answer "build side first" would be answering a different question from the plan it was
  *       substituted into.
- *   <li><b>The cardinality gate does not reach it.</b> {@code AcceleratorCardinalityStrategy}
- *       stops its walk at any node with more than one input, deliberately and from before this
- *       existed. So a join is decided on the planner's estimate; refining it would mean saying
- *       which of two inputs a byte count bounds, which the refinement's signature cannot express.
- *       Left as it is rather than half-changed.
+ *   <li><b>The cardinality gate does not reach it.</b> {@code AcceleratorCardinalityStrategy} stops
+ *       its walk at any node with more than one input, deliberately and from before this existed.
+ *       So a join is decided on the planner's estimate; refining it would mean saying which of two
+ *       inputs a byte count bounds, which the refinement's signature cannot express. Left as it is
+ *       rather than half-changed.
  * </ul>
  */
 public class GpuOrCpuJoinOperatorFactory extends AbstractStreamOperatorFactory<RowData> {
@@ -93,11 +94,17 @@ public class GpuOrCpuJoinOperatorFactory extends AbstractStreamOperatorFactory<R
     public <T extends StreamOperator<RowData>> T createStreamOperator(
             StreamOperatorParameters<RowData> parameters) {
         try {
+            String retry = GpuOrCpuCalcOperatorFactory.retryAttempt(parameters);
+            if (retry != null) {
+                return codeGenerated(parameters, AcceleratorDeclineReason.RETRY_ATTEMPT, retry);
+            }
             ClassLoader loader = parameters.getContainingTask().getUserCodeClassLoader();
             Optional<AcceleratorProvider> accelerator = AcceleratorProviders.find(loader);
             if (!accelerator.isPresent()) {
                 return codeGenerated(
-                        parameters, "no accelerator provider on this TaskManager's classpath");
+                        parameters,
+                        AcceleratorDeclineReason.NO_PROVIDER,
+                        "no accelerator provider on this TaskManager's classpath");
             }
             AcceleratorChoice.Outcome outcome =
                     AcceleratorChoice.choose(
@@ -107,7 +114,7 @@ public class GpuOrCpuJoinOperatorFactory extends AbstractStreamOperatorFactory<R
                             spec.minSpeedup(),
                             spec.work().estimatedRows());
             if (!outcome.accelerated()) {
-                return codeGenerated(parameters, outcome.reason());
+                return codeGenerated(parameters, outcome.code(), outcome.reason());
             }
             ManagedOffHeapArena staging = AcceleratorSetup.reserveStaging(spec, parameters);
             StreamOperatorFactory<RowData> built =
@@ -123,7 +130,8 @@ public class GpuOrCpuJoinOperatorFactory extends AbstractStreamOperatorFactory<R
                                             staging));
             built.setChainingStrategy(getChainingStrategy());
             if (built instanceof ProcessingTimeServiceAware) {
-                ((ProcessingTimeServiceAware) built).setProcessingTimeService(processingTimeService);
+                ((ProcessingTimeServiceAware) built)
+                        .setProcessingTimeService(processingTimeService);
             }
             StreamOperator<RowData> device = built.createStreamOperator(parameters);
             if (!(device instanceof TwoInputStreamOperator)) {
@@ -142,14 +150,15 @@ public class GpuOrCpuJoinOperatorFactory extends AbstractStreamOperatorFactory<R
             TwoInputStreamOperator<RowData, RowData, RowData> twoInput =
                     (TwoInputStreamOperator<RowData, RowData, RowData>) device;
             FallbackToCpuTwoInputOperator guarded =
-                    FallbackToCpuTwoInputOperator.around(
-                            twoInput, cpuFactory, parameters, staging);
+                    FallbackToCpuTwoInputOperator.around(twoInput, cpuFactory, parameters, staging);
             @SuppressWarnings("unchecked")
             T operator = (T) guarded;
-            return report(operator, guarded, outcome.reason());
+            return report(operator, guarded, outcome.code(), outcome.reason());
         } catch (Throwable t) {
             return codeGenerated(
-                    parameters, "accelerator operator could not be created (" + t + ")");
+                    parameters,
+                    AcceleratorDeclineReason.OPERATOR_CREATION_FAILED,
+                    "accelerator operator could not be created (" + t + ")");
         }
     }
 
@@ -165,22 +174,30 @@ public class GpuOrCpuJoinOperatorFactory extends AbstractStreamOperatorFactory<R
     }
 
     private <T extends StreamOperator<RowData>> T codeGenerated(
-            StreamOperatorParameters<RowData> parameters, String reason) {
+            StreamOperatorParameters<RowData> parameters,
+            AcceleratorDeclineReason code,
+            String reason) {
         LOG.info(
                 "Accelerator declined on this TaskManager, running the generated CPU operator: {}",
                 reason);
-        return report(cpuFactory.createStreamOperator(parameters), null, reason);
+        return report(cpuFactory.createStreamOperator(parameters), null, code, reason);
     }
 
     private static <T extends StreamOperator<RowData>> T report(
-            T operator, @Nullable FallbackToCpuTwoInputOperator guarded, String reason) {
+            T operator,
+            @Nullable FallbackToCpuTwoInputOperator guarded,
+            AcceleratorDeclineReason code,
+            String reason) {
         try {
             OperatorMetricGroup metrics = operator.getMetricGroup();
             metrics.gauge(
                     GpuOrCpuCalcOperatorFactory.ACCELERATED,
                     (Gauge<Integer>) () -> guarded != null && guarded.isAccelerated() ? 1 : 0);
+            metrics.gauge(GpuOrCpuCalcOperatorFactory.DECISION, (Gauge<String>) () -> reason);
             metrics.gauge(
-                    GpuOrCpuCalcOperatorFactory.DECISION, (Gauge<String>) () -> reason);
+                    GpuOrCpuCalcOperatorFactory.DECISION_CODE,
+                    (Gauge<String>)
+                            () -> (guarded != null ? guarded.declineReason() : code).name());
         } catch (Throwable t) {
             LOG.debug("Could not publish the accelerator decision ({})", t.toString());
         }

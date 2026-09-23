@@ -35,6 +35,7 @@ import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
 import org.apache.flink.streaming.runtime.streamrecord.RecordAttributes;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
+import org.apache.flink.table.accelerator.AcceleratorDeclineReason;
 import org.apache.flink.table.data.RowData;
 
 import org.slf4j.Logger;
@@ -91,6 +92,10 @@ public final class FallbackToCpuOperator
 
     private OneInputStreamOperator<RowData, RowData> delegate;
     private boolean accelerated = true;
+
+    /** Which of the two safe fallback points was taken, or {@code ACCELERATED} if neither. */
+    private AcceleratorDeclineReason declineReason = AcceleratorDeclineReason.ACCELERATED;
+
     private boolean sawFirstRecord;
 
     FallbackToCpuOperator(
@@ -114,7 +119,10 @@ public final class FallbackToCpuOperator
         try {
             delegate.open();
         } catch (Throwable t) {
-            switchToCpu("opening the accelerated operator failed", t);
+            switchToCpu(
+                    AcceleratorDeclineReason.FELL_BACK_AT_OPEN,
+                    "opening the accelerated operator failed",
+                    t);
             delegate.open();
         }
     }
@@ -132,7 +140,10 @@ public final class FallbackToCpuOperator
             delegate.processElement(element);
             sawFirstRecord = true;
         } catch (Throwable t) {
-            switchToCpu("the accelerated operator failed on its first record", t);
+            switchToCpu(
+                    AcceleratorDeclineReason.FELL_BACK_AT_FIRST_RECORD,
+                    "the accelerated operator failed on its first record",
+                    t);
             delegate.open();
             delegate.processElement(element);
             sawFirstRecord = true;
@@ -140,7 +151,9 @@ public final class FallbackToCpuOperator
     }
 
     /** Logged once, at WARN: a job quietly running on the CPU it was told would use a device. */
-    private void switchToCpu(String what, Throwable cause) throws Exception {
+    private void switchToCpu(AcceleratorDeclineReason why, String what, Throwable cause)
+            throws Exception {
+        declineReason = why;
         LOG.warn(
                 "{}; this subtask will finish on the generated operator instead. The accelerator"
                         + " is not used again for this task.",
@@ -159,6 +172,11 @@ public final class FallbackToCpuOperator
     /** Whether a device is still serving this subtask. Reported as a metric by the factory. */
     public boolean isAccelerated() {
         return accelerated;
+    }
+
+    /** The same fact as a value: which fallback point was taken, if any. */
+    public AcceleratorDeclineReason declineReason() {
+        return declineReason;
     }
 
     @Override

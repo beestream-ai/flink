@@ -37,6 +37,7 @@ import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
 import org.apache.flink.streaming.runtime.streamrecord.RecordAttributes;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
+import org.apache.flink.table.accelerator.AcceleratorDeclineReason;
 import org.apache.flink.table.data.RowData;
 
 import org.slf4j.Logger;
@@ -74,8 +75,7 @@ public final class FallbackToCpuTwoInputOperator
                 BoundedMultiInput,
                 InputSelectable {
 
-    private static final Logger LOG =
-            LoggerFactory.getLogger(FallbackToCpuTwoInputOperator.class);
+    private static final Logger LOG = LoggerFactory.getLogger(FallbackToCpuTwoInputOperator.class);
 
     private final Supplier<TwoInputStreamOperator<RowData, RowData, RowData>> cpu;
 
@@ -84,6 +84,10 @@ public final class FallbackToCpuTwoInputOperator
 
     private TwoInputStreamOperator<RowData, RowData, RowData> delegate;
     private boolean accelerated = true;
+
+    /** Which of the two safe fallback points was taken, or {@code ACCELERATED} if neither. */
+    private AcceleratorDeclineReason declineReason = AcceleratorDeclineReason.ACCELERATED;
+
     private boolean sawFirstBuildRecord;
 
     FallbackToCpuTwoInputOperator(
@@ -103,8 +107,7 @@ public final class FallbackToCpuTwoInputOperator
         return new FallbackToCpuTwoInputOperator(
                 accelerated,
                 () -> {
-                    StreamOperator<RowData> built =
-                            cpuFactory.createStreamOperator(parameters);
+                    StreamOperator<RowData> built = cpuFactory.createStreamOperator(parameters);
                     @SuppressWarnings("unchecked")
                     TwoInputStreamOperator<RowData, RowData, RowData> twoInput =
                             (TwoInputStreamOperator<RowData, RowData, RowData>) built;
@@ -118,7 +121,10 @@ public final class FallbackToCpuTwoInputOperator
         try {
             delegate.open();
         } catch (Throwable t) {
-            switchToCpu("opening the accelerated operator failed", t);
+            switchToCpu(
+                    AcceleratorDeclineReason.FELL_BACK_AT_OPEN,
+                    "opening the accelerated operator failed",
+                    t);
             delegate.open();
         }
     }
@@ -133,7 +139,10 @@ public final class FallbackToCpuTwoInputOperator
             delegate.processElement1(element);
             sawFirstBuildRecord = true;
         } catch (Throwable t) {
-            switchToCpu("the accelerated operator failed on its first build record", t);
+            switchToCpu(
+                    AcceleratorDeclineReason.FELL_BACK_AT_FIRST_RECORD,
+                    "the accelerated operator failed on its first build record",
+                    t);
             delegate.open();
             delegate.processElement1(element);
             sawFirstBuildRecord = true;
@@ -163,6 +172,21 @@ public final class FallbackToCpuTwoInputOperator
     }
 
     /**
+     * The same fact as a value: which fallback point was taken, if any.
+     *
+     * <p>Read the same way {@link #isAccelerated()} is, so that an operator which left the device
+     * on its own is reported as that rather than as still accelerated.
+     */
+    public AcceleratorDeclineReason declineReason() {
+        if (declineReason != AcceleratorDeclineReason.ACCELERATED) {
+            return declineReason;
+        }
+        return isAccelerated()
+                ? AcceleratorDeclineReason.ACCELERATED
+                : AcceleratorDeclineReason.PROVIDER_STOPPED_USING_DEVICE;
+    }
+
+    /**
      * Implemented by an accelerated operator that can stop using its device without failing.
      *
      * <p>A one-input Calc cannot: a failure mid-batch has consumed rows it cannot reproduce, so
@@ -174,7 +198,9 @@ public final class FallbackToCpuTwoInputOperator
         boolean stillOnDevice();
     }
 
-    private void switchToCpu(String what, Throwable cause) throws Exception {
+    private void switchToCpu(AcceleratorDeclineReason why, String what, Throwable cause)
+            throws Exception {
+        declineReason = why;
         LOG.warn(
                 "{}; this subtask will finish on the generated operator instead. The accelerator"
                         + " is not used again for this task.",
