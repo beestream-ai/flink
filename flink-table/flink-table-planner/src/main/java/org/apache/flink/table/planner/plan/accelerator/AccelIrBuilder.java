@@ -18,6 +18,7 @@
 
 package org.apache.flink.table.planner.plan.accelerator;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.table.accelerator.AccelAggCall;
 import org.apache.flink.table.accelerator.AccelAggFunction;
 import org.apache.flink.table.accelerator.AccelAggregate;
@@ -26,14 +27,16 @@ import org.apache.flink.table.accelerator.AccelExpression;
 import org.apache.flink.table.accelerator.AccelFilter;
 import org.apache.flink.table.accelerator.AccelFunction;
 import org.apache.flink.table.accelerator.AccelInput;
-import org.apache.flink.table.accelerator.AccelJoin;
-import org.apache.flink.table.accelerator.AccelOverAggregate;
 import org.apache.flink.table.accelerator.AccelInputRef;
+import org.apache.flink.table.accelerator.AccelJoin;
 import org.apache.flink.table.accelerator.AccelLiteral;
 import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.accelerator.AccelOverAggregate;
 import org.apache.flink.table.accelerator.AccelProject;
 import org.apache.flink.table.accelerator.AccelSort;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
+import org.apache.flink.table.data.DecimalData;
+import org.apache.flink.table.data.DecimalDataUtils;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
@@ -44,6 +47,7 @@ import org.apache.flink.table.planner.plan.gpu.GpuOverAggregateSupport;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.JoinSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.OverSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
+import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -64,9 +68,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.OptionalInt;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 /**
  * Converts the planner's {@code RexNode} trees into accelerator IR.
@@ -255,8 +259,8 @@ public final class AccelIrBuilder {
      * Builds the IR for a running total, or empty where the shape is not describable.
      *
      * <p>{@link GpuOverAggregateSupport#estimate} has already refused everything this cannot
-     * express by the time this is called; the check here is the one that survives being called
-     * from somewhere else.
+     * express by the time this is called; the check here is the one that survives being called from
+     * somewhere else.
      */
     public static Optional<AccelNode> buildOverAggregate(
             OverSpec overSpec, RowType inputType, RowType outputType) {
@@ -448,7 +452,7 @@ public final class AccelIrBuilder {
         if (value == null) {
             box = null;
         } else if (value instanceof BigDecimal) {
-            box = ((BigDecimal) value).doubleValue();
+            box = asFlinkDouble((BigDecimal) value, type.get());
         } else if (value instanceof Number) {
             box = ((Number) value).doubleValue();
         } else if (value instanceof Boolean) {
@@ -457,6 +461,41 @@ public final class AccelIrBuilder {
             return Optional.empty();
         }
         return Optional.of(new AccelLiteral(box, type.get()));
+    }
+
+    /**
+     * A DECIMAL literal as the double Flink's own runtime would use, which is not always the
+     * nearest one.
+     *
+     * <p>{@code BigDecimal.doubleValue()} is correctly rounded. Flink is not: {@code
+     * DecimalDataUtils.doubleValue} converts a compact decimal — precision 18 or less, held as a
+     * {@code long} — as {@code ((double) unscaledLong) / POW10[scale]}, a division that rounds
+     * again. For some literals the two land on different doubles.
+     *
+     * <p>This mattered because the IR carries a {@code double} and the provider generates a kernel
+     * from it: converting the better way here made the kernel compute something Flink's CPU does
+     * not. Traced from a disagreement over 10M rows in which one constant differed on every row
+     * while seven others agreed:
+     *
+     * <pre>
+     *   0.9909456437464825   correctly rounded -> 0.9909456437464825
+     *                        Flink's runtime   -> 0.9909456437464824
+     * </pre>
+     *
+     * <p>An accelerator has to reproduce the engine it is accelerating, including where the engine
+     * is less accurate than it could be. Anything else is a different query.
+     */
+    @VisibleForTesting
+    static double asFlinkDouble(BigDecimal value, LogicalType declared) {
+        if (declared instanceof DecimalType) {
+            final DecimalType type = (DecimalType) declared;
+            final DecimalData asFlink =
+                    DecimalData.fromBigDecimal(value, type.getPrecision(), type.getScale());
+            if (asFlink != null) {
+                return DecimalDataUtils.doubleValue(asFlink);
+            }
+        }
+        return value.doubleValue();
     }
 
     private static Optional<LogicalType> logicalType(RexNode node) {
