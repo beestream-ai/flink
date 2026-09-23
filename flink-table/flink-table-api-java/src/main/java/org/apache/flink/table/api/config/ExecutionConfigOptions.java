@@ -1332,6 +1332,60 @@ public class ExecutionConfigOptions {
                                     + "estimate for its own device, made on the TaskManager. Not "
                                     + "a hardware constant: it means the same on any accelerator.");
 
+    /**
+     * The largest subtask parallelism at which a node may still be offloaded.
+     *
+     * <p>A containment, not a tuning knob, and the distinction matters. Repeated jobs at
+     * parallelism above 1 sharing one device have been observed to fail intermittently with {@code
+     * CUDA_ERROR_LAUNCH_FAILED}, and the first failing operation has not been identified. Device
+     * memory was ruled out by measurement -- the card peaked at 2.4 GiB of 8 GiB during a failing
+     * run -- so the cause is open.
+     *
+     * <p>Until it is closed, a subtask whose parallelism exceeds this runs the generated CPU
+     * operator and says so, which is the contract's rule for a configuration that cannot be
+     * admitted safely: decline predictably beforehand rather than fail unpredictably during
+     * execution. The default of 1 is the largest value tested clean, not a statement that 2 is
+     * unsafe; raise it to measure, and expect intermittent failures above 1 until the cause is
+     * found.
+     */
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
+    public static final ConfigOption<Integer> TABLE_EXEC_ACCELERATOR_MAX_PARALLELISM =
+            ConfigOptions.key("table.exec.accelerator.max-parallelism")
+                    .intType()
+                    .defaultValue(1)
+                    .withDescription(
+                            "The largest subtask parallelism at which a node may be offloaded. "
+                                    + "Above it the generated CPU operator runs instead and the "
+                                    + "decision metric reports PARALLELISM_ABOVE_SUPPORTED. The "
+                                    + "default of 1 contains an unexplained intermittent CUDA "
+                                    + "launch failure seen at higher parallelism on a single "
+                                    + "device; it is not a performance setting.");
+
+    /**
+     * Whether an accelerated subtree may compute values a device rounds differently from Flink.
+     *
+     * <p>{@code EXP}, {@code LN}, {@code SIN} and the rest come from the device's math library,
+     * which specifies its own accuracy and is not required to agree with {@code java.lang.Math}. A
+     * query that returns different numbers depending on where it ran is not the same query, so this
+     * is off by default and such a subtree simply runs on the CPU.
+     *
+     * <p>Turning it on gives up the <em>output-value</em> guarantee and nothing else. The
+     * <em>membership</em> guarantee is still enforced: an offload whose drifting value could reach
+     * a filter, join, grouping, sort or limit is refused either way, so the set of rows a query
+     * returns does not depend on this setting. It is an explicitly approximate mode and is not
+     * transparent acceleration.
+     */
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
+    public static final ConfigOption<Boolean> TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS =
+            ConfigOptions.key("table.exec.accelerator.approximate-projections")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether an accelerated subtree may compute values a device rounds"
+                                    + " differently from Flink. Off by default; turning it on gives up"
+                                    + " the output-value guarantee, and the set of rows returned is"
+                                    + " unchanged either way.");
+
     @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
     public static final ConfigOption<Integer> TABLE_EXEC_ACCELERATOR_BATCH_SIZE =
             ConfigOptions.key("table.exec.accelerator.batch-size")
