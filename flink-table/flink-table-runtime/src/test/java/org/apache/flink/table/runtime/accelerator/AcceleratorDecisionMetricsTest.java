@@ -32,6 +32,7 @@ import org.apache.flink.table.accelerator.AccelInput;
 import org.apache.flink.table.accelerator.AccelInputRef;
 import org.apache.flink.table.accelerator.AccelProject;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
+import org.apache.flink.table.accelerator.AcceleratorDeclineReason;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
 import org.apache.flink.table.types.logical.DoubleType;
@@ -139,5 +140,8 @@ class AcceleratorDecisionMetricsTest {
         assertThat((String) PUBLISHED.get(GpuOrCpuCalcOperatorFactory.DECISION))
                 .as("the reason travels with the verdict, or the gauge only raises questions")
                 .contains("no accelerator provider");
+        assertThat((String) PUBLISHED.get(GpuOrCpuCalcOperatorFactory.DECISION_CODE))
+                .as("and the same verdict as something a dashboard can count")
+                .isEqualTo(AcceleratorDeclineReason.NO_PROVIDER.name());
     }
 }

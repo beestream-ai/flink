@@ -21,6 +21,7 @@ package org.apache.flink.table.runtime.accelerator;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
+import org.apache.flink.table.accelerator.AcceleratorDeclineReason;
 
 import java.util.Optional;
 
@@ -49,10 +50,13 @@ public final class AcceleratorChoice {
     public static final class Outcome {
 
         private final Optional<AcceleratorPlan> plan;
+        private final AcceleratorDeclineReason code;
         private final String reason;
 
-        private Outcome(Optional<AcceleratorPlan> plan, String reason) {
+        private Outcome(
+                Optional<AcceleratorPlan> plan, AcceleratorDeclineReason code, String reason) {
             this.plan = plan;
+            this.code = code;
             this.reason = reason;
         }
 
@@ -67,6 +71,16 @@ public final class AcceleratorChoice {
 
         public String reason() {
             return reason;
+        }
+
+        /**
+         * The same verdict as a value, for whatever has to count these rather than read one.
+         *
+         * <p>{@link #reason()} carries the numbers and the provider's name; this carries only what
+         * kind of answer it was, which is the part a metric can aggregate.
+         */
+        public AcceleratorDeclineReason code() {
+            return code;
         }
 
         @Override
@@ -101,21 +115,27 @@ public final class AcceleratorChoice {
         } catch (Throwable declined) {
             // The SPI forbids throwing, but a provider is third-party code and a task that has a
             // perfectly good CPU implementation must not die because one misbehaved.
-            return cpu("provider " + provider.name() + " threw (" + declined + ")");
+            return cpu(
+                    AcceleratorDeclineReason.PROVIDER_THREW,
+                    "provider " + provider.name() + " threw (" + declined + ")");
         }
         if (offered == null || !offered.isPresent()) {
-            return cpu("provider " + provider.name() + " declined the subtree");
+            return cpu(
+                    AcceleratorDeclineReason.PROVIDER_DECLINED,
+                    "provider " + provider.name() + " declined the subtree");
         }
 
         AcceleratorCost cost = offered.get().cost();
         if (cost.speedupOverCpu() < minSpeedup) {
             return cpu(
+                    AcceleratorDeclineReason.BELOW_MIN_SPEEDUP,
                     String.format(
                             "provider %s claims %.2fx, below the %.2fx Flink requires",
                             provider.name(), cost.speedupOverCpu(), minSpeedup));
         }
         if (!repaysFixedCost(cost, work, estimatedRows)) {
             return cpu(
+                    AcceleratorDeclineReason.FIXED_COST_NOT_REPAID,
                     String.format(
                             "provider %s claims %.2fx, but %d rows do not repay %d ms of setup",
                             provider.name(),
@@ -125,6 +145,7 @@ public final class AcceleratorChoice {
         }
         return new Outcome(
                 offered,
+                AcceleratorDeclineReason.ACCELERATED,
                 String.format(
                         "provider %s claims %.2fx over CPU",
                         provider.name(), cost.speedupOverCpu()));
@@ -161,7 +182,12 @@ public final class AcceleratorChoice {
         return saved > cost.fixedCostNanos();
     }
 
-    private static Outcome cpu(String reason) {
-        return new Outcome(Optional.empty(), reason);
+    private static Outcome cpu(AcceleratorDeclineReason code, String reason) {
+        return new Outcome(Optional.empty(), code, reason);
+    }
+
+    /** The verdicts made before a provider is even asked, so that they carry a code too. */
+    public static Outcome declined(AcceleratorDeclineReason code, String reason) {
+        return cpu(code, reason);
     }
 }

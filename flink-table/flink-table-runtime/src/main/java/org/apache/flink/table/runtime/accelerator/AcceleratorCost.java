@@ -69,10 +69,7 @@ public final class AcceleratorCost implements Serializable {
     }
 
     public AcceleratorCost(
-            double speedupOverCpu,
-            long fixedCostNanos,
-            long perBatchNanos,
-            double cpuNanosPerRow) {
+            double speedupOverCpu, long fixedCostNanos, long perBatchNanos, double cpuNanosPerRow) {
         if (!(speedupOverCpu > 0.0) || Double.isInfinite(speedupOverCpu)) {
             throw new IllegalArgumentException(
                     "speedupOverCpu must be finite and positive, was " + speedupOverCpu);
