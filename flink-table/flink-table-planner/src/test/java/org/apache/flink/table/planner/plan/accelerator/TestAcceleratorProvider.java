@@ -86,8 +86,8 @@ public class TestAcceleratorProvider implements AcceleratorProvider {
      *
      * <p>A count rather than a {@code LAST_WAS_} flag, because a query with an {@code ORDER BY}
      * inside its {@code OVER} offers <em>two</em> offloadable nodes — the window and the sort
-     * beneath it — and whichever is offered second overwrites a flag. That is not hypothetical:
-     * it is every query this node serves.
+     * beneath it — and whichever is offered second overwrites a flag. That is not hypothetical: it
+     * is every query this node serves.
      */
     public static final AtomicInteger OVER_PLANS_OFFERED = new AtomicInteger();
 

@@ -48,6 +48,31 @@ class GpuOffloadExplainIT {
                         + "'connector' = 'datagen', 'number-of-rows' = '10')");
     }
 
+    /**
+     * A predicate written outside the projection still ends up inside the same offloaded node.
+     *
+     * <p>Worth pinning because a query author naturally writes it the other way round -- compute a
+     * column in a subquery, filter on it outside -- and whether the two become one {@code Calc} is
+     * Calcite's decision, not this project's. They do, and the provider is offered a projection
+     * over a filter; if that ever stops being true the offloaded subtree becomes a projection alone
+     * with a separate {@code Filter} above it, and the device compaction has nothing to compact.
+     */
+    @Test
+    @DisplayName("a filter on a computed column joins the projection in one offloaded subtree")
+    void filterOnAComputedColumnFusesIntoTheCalc() {
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        String plan =
+                tEnv.explainSql(
+                        "SELECT h FROM ("
+                                + "SELECT EXP(val) * LN(val) + SIN(val) * COS(val)"
+                                + " + POWER(val, 3.0) AS h FROM t) WHERE h < 100.0");
+
+        assertTrue(plan.contains("== GPU Offload =="), plan);
+        assertTrue(plan.contains("GPU  subtree 0"), plan);
+        // One Calc, carrying both. Two would mean the predicate did not reach the offloaded node.
+        assertFalse(plan.contains("subtree 1"), plan);
+    }
+
     @Test
     @DisplayName("no section at all when the feature is off")
     void silentWhenDisabled() {

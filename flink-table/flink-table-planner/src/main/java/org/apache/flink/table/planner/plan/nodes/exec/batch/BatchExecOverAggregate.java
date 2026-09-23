@@ -23,6 +23,8 @@ import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
+import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
@@ -36,18 +38,16 @@ import org.apache.flink.table.planner.codegen.over.RangeBoundComparatorCodeGener
 import org.apache.flink.table.planner.codegen.sort.ComparatorCodeGenerator;
 import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.functions.aggfunctions.SizeBasedWindowFunction;
+import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
+import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
+import org.apache.flink.table.planner.plan.gpu.GpuOverAggregateSupport;
+import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeContext;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeMetadata;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.accelerator.AccelNode;
-import org.apache.flink.table.accelerator.AccelWorkProfile;
-import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
-import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
-import org.apache.flink.table.planner.plan.gpu.GpuOverAggregateSupport;
-import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.OverSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.OverSpec.GroupSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
@@ -57,8 +57,10 @@ import org.apache.flink.table.planner.plan.utils.AggregateUtil;
 import org.apache.flink.table.planner.plan.utils.OverAggregateUtil;
 import org.apache.flink.table.planner.plan.utils.SortUtil;
 import org.apache.flink.table.planner.utils.JavaScalaConversionUtil;
+import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
 import org.apache.flink.table.runtime.generated.GeneratedAggsHandleFunction;
 import org.apache.flink.table.runtime.generated.GeneratedRecordComparator;
+import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
 import org.apache.flink.table.runtime.operators.TableStreamOperator;
 import org.apache.flink.table.runtime.operators.over.BufferDataOverWindowOperator;
 import org.apache.flink.table.runtime.operators.over.NonBufferOverWindowOperator;
@@ -72,8 +74,6 @@ import org.apache.flink.table.runtime.operators.over.frame.RowSlidingOverFrame;
 import org.apache.flink.table.runtime.operators.over.frame.RowUnboundedFollowingOverFrame;
 import org.apache.flink.table.runtime.operators.over.frame.RowUnboundedPrecedingOverFrame;
 import org.apache.flink.table.runtime.operators.over.frame.UnboundedOverWindowFrame;
-import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
-import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -236,8 +236,8 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
      * rather than the sort's: an unbounded-preceding running total is served a batch at a time,
      * carrying one number between batches, so {@code GpuOrCpuCalcOperatorFactory} is the right
      * factory and not a third one. What is being replaced is {@code NonBufferOverWindowOperator},
-     * which is Flink's cheap path — it buffers nothing and reserves no managed memory — and that
-     * is worth knowing before reading any speedup from this node.
+     * which is Flink's cheap path — it buffers nothing and reserves no managed memory — and that is
+     * worth knowing before reading any speedup from this node.
      */
     private StreamOperatorFactory<RowData> substitute(
             ExecNodeConfig config, RowType inputType, StreamOperatorFactory<RowData> onCpu) {
@@ -247,8 +247,7 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
             return onCpu;
         }
         Optional<AccelNode> subtree =
-                AccelIrBuilder.buildOverAggregate(
-                        overSpec, inputType, (RowType) getOutputType());
+                AccelIrBuilder.buildOverAggregate(overSpec, inputType, (RowType) getOutputType());
         if (!subtree.isPresent()) {
             return onCpu;
         }

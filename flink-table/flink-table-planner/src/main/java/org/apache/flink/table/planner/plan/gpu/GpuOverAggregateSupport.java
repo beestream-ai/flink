@@ -101,8 +101,7 @@ public final class GpuOverAggregateSupport {
         // Carried even though this node needs no cardinality of its own: a subtree's profile
         // merges to UNKNOWN_ROWS if any member is unknown, and this node sits directly above the
         // Sort its own ORDER BY created -- which does need one.
-        return RowCost.of(
-                new AccelWorkProfile(ops, inWidth, rowWidth(outputType), estimatedRows));
+        return RowCost.of(new AccelWorkProfile(ops, inWidth, rowWidth(outputType), estimatedRows));
     }
 
     /** Which input field the single {@code SUM} accumulates, when {@link #estimate} allowed it. */
@@ -111,7 +110,8 @@ public final class GpuOverAggregateSupport {
             return OptionalInt.empty();
         }
         OverSpec.GroupSpec group = overSpec.getGroups().get(0);
-        if (group.getAggCalls().size() != 1 || group.getAggCalls().get(0).getArgList().size() != 1) {
+        if (group.getAggCalls().size() != 1
+                || group.getAggCalls().get(0).getArgList().size() != 1) {
             return OptionalInt.empty();
         }
         return OptionalInt.of(group.getAggCalls().get(0).getArgList().get(0));

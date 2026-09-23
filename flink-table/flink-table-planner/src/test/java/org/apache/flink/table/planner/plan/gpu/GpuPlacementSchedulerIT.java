@@ -22,6 +22,7 @@ import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobGraph;
@@ -100,6 +101,9 @@ class GpuPlacementSchedulerIT {
         final Configuration conf = new Configuration();
         conf.set(TaskManagerOptions.NUM_TASK_SLOTS, 4);
         conf.set(JobManagerOptions.SCHEDULER, scheduler);
+        // An ephemeral REST port: the fixed default collides with anything else already bound to
+        // 8081, and the cluster then fails to start before a single scheduling assertion is made.
+        conf.set(RestOptions.BIND_PORT, "0");
         try (MiniCluster cluster =
                 new MiniCluster(
                         new MiniClusterConfiguration.Builder()

@@ -80,6 +80,17 @@ final class AccelInterpreter {
      * current offload path does not do this — it reads a null {@code DOUBLE} as 0.0 and computes on
      * it — which is review finding A1. Doing it correctly here means a test can tell the two
      * behaviours apart.
+     *
+     * <p><b>Four functions interrupt that propagation</b>, and they have to, because propagation is
+     * what they exist to answer questions about: {@code IS NULL} and {@code IS NOT NULL} report on
+     * a null instead of being swallowed by one, and {@code AND} and {@code OR} are three-valued —
+     * {@code unknown AND false} is false and {@code unknown OR true} is true, because in each case
+     * the known operand settles the answer whatever the unknown one is.
+     *
+     * <p>Before {@code AcceleratorConformanceIT} they were not: {@code IS NULL} had no case here at
+     * all and both connectives propagated, so {@code WHERE a IS NULL} matched nothing and {@code
+     * WHERE a > 0 OR b > 0} dropped every row whose {@code a} was absent. Every planner test that
+     * compares against this interpreter was checking null behaviour against a wrong oracle.
      */
     static Double eval(AccelExpression expression, RowData row) {
         if (expression instanceof AccelInputRef) {
@@ -97,6 +108,32 @@ final class AccelInterpreter {
         List<AccelExpression> operands = call.operands();
         Double a = eval(operands.get(0), row);
         Double b = operands.size() > 1 ? eval(operands.get(1), row) : null;
+
+        // The three functions that must see a null rather than be short-circuited by one. They are
+        // handled before the propagation guard below, because propagation is exactly what they
+        // exist to interrupt: an IS NULL that returned null would never be true, and a
+        // three-valued OR whose true branch was swallowed would drop rows SQL keeps.
+        switch (call.function()) {
+            case IS_NULL:
+                return bool(a == null);
+            case IS_NOT_NULL:
+                return bool(a != null);
+            case AND:
+                // FALSE dominates: unknown AND false is false, whichever side is unknown.
+                if (isFalse(a) || isFalse(b)) {
+                    return bool(false);
+                }
+                return a == null || b == null ? null : bool(a != 0.0 && b != 0.0);
+            case OR:
+                // TRUE dominates, symmetrically.
+                if (isTrue(a) || isTrue(b)) {
+                    return bool(true);
+                }
+                return a == null || b == null ? null : bool(a != 0.0 || b != 0.0);
+            default:
+                break;
+        }
+
         if (a == null || (operands.size() > 1 && b == null)) {
             return null;
         }
@@ -154,21 +191,21 @@ final class AccelInterpreter {
             case CAST:
                 return a;
             case EQUALS:
-                return bool(a.doubleValue() == b.doubleValue());
+                return totalOrder(operands)
+                        ? bool(Double.compare(a, b) == 0)
+                        : bool(a.doubleValue() == b.doubleValue());
             case NOT_EQUALS:
-                return bool(a.doubleValue() != b.doubleValue());
+                return totalOrder(operands)
+                        ? bool(Double.compare(a, b) != 0)
+                        : bool(a.doubleValue() != b.doubleValue());
             case LESS_THAN:
-                return bool(a < b);
+                return totalOrder(operands) ? bool(Double.compare(a, b) < 0) : bool(a < b);
             case LESS_OR_EQUAL:
-                return bool(a <= b);
+                return totalOrder(operands) ? bool(Double.compare(a, b) <= 0) : bool(a <= b);
             case GREATER_THAN:
-                return bool(a > b);
+                return totalOrder(operands) ? bool(Double.compare(a, b) > 0) : bool(a > b);
             case GREATER_OR_EQUAL:
-                return bool(a >= b);
-            case AND:
-                return bool(a != 0.0 && b != 0.0);
-            case OR:
-                return bool(a != 0.0 || b != 0.0);
+                return totalOrder(operands) ? bool(Double.compare(a, b) >= 0) : bool(a >= b);
             case NOT:
                 return bool(a == 0.0);
             default:
@@ -179,6 +216,40 @@ final class AccelInterpreter {
 
     private static Double bool(boolean value) {
         return value ? 1.0 : 0.0;
+    }
+
+    /**
+     * Whether this comparison is one Flink evaluates as a total order rather than with IEEE rules.
+     *
+     * <p>It does so whenever either operand is {@code DECIMAL}, and a bare {@code 0.5} in SQL is a
+     * decimal literal — so {@code WHERE val > 0.5} is one of these and {@code WHERE val > CAST(0.5
+     * AS DOUBLE)} is not. {@code ScalarOperatorGens.generateComparisonSameType} takes the decimal
+     * branch and emits {@code DecimalDataUtils.compare(l, r) op 0}, which for an approximate
+     * numeric against a decimal is {@code Double.compare} — a total order in which NaN is greater
+     * than everything and equal to itself, and {@code -0.0} is strictly less than {@code 0.0}.
+     *
+     * <p>Matching it is not a preference. An accelerated predicate that used IEEE semantics here
+     * would drop the rows Flink keeps whenever a NaN reached the comparison, which is a changed
+     * query result rather than a rounding difference. Found by {@code AcceleratorConformanceIT};
+     * the IR carries the literal's declared type, so nothing new had to be added to express it.
+     */
+    private static boolean totalOrder(List<AccelExpression> operands) {
+        for (AccelExpression operand : operands) {
+            if (operand.outputType().getTypeRoot() == LogicalTypeRoot.DECIMAL) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A known FALSE, as against a null that is merely not TRUE. */
+    private static boolean isFalse(Double value) {
+        return value != null && value == 0.0;
+    }
+
+    /** A known TRUE. NaN counts, which cannot arise: a comparison yields 1.0 or 0.0. */
+    private static boolean isTrue(Double value) {
+        return value != null && value != 0.0;
     }
 
     private static double readAsDouble(RowData row, int index, AccelExpression expression) {

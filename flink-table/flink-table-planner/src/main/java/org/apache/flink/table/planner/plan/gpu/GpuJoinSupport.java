@@ -92,7 +92,11 @@ public final class GpuJoinSupport {
         LogicalType probeKey = probeType.getTypeAt(probeKeyOf(joinSpec, leftIsBuild));
         if (!isJoinableOnDevice(buildKey) || !isJoinableOnDevice(probeKey)) {
             return RowCost.ineligible(
-                    "a join key of type " + buildKey + " / " + probeKey + " is not joined on device");
+                    "a join key of type "
+                            + buildKey
+                            + " / "
+                            + probeKey
+                            + " is not joined on device");
         }
         if (buildKey.isNullable() || probeKey.isNullable()) {
             // SQL's equality is not true for two nulls, so a null key matches nothing; a device
@@ -104,16 +108,15 @@ public final class GpuJoinSupport {
         int[] ops = new int[AccelFunction.values().length];
         ops[AccelFunction.LESS_THAN.ordinal()] = comparisonsPerRow(buildRows);
         return RowCost.of(
-                new AccelWorkProfile(
-                        ops, rowWidth(probeType), rowWidth(outputType), probeRows));
+                new AccelWorkProfile(ops, rowWidth(probeType), rowWidth(outputType), probeRows));
     }
 
     /**
      * Which field of the build row the single equality names.
      *
      * <p>{@code JoinSpec} speaks left and right, the transformation speaks build and probe, and
-     * only the exec node knows which is which — so it says, rather than this inferring it from
-     * row types that may well be identical.
+     * only the exec node knows which is which — so it says, rather than this inferring it from row
+     * types that may well be identical.
      */
     public static int buildKeyOf(JoinSpec joinSpec, boolean leftIsBuild) {
         return leftIsBuild ? joinSpec.getLeftKeys()[0] : joinSpec.getRightKeys()[0];

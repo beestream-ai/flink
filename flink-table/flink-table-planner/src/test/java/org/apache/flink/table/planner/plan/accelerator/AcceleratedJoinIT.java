@@ -73,8 +73,7 @@ class AcceleratedJoinIT {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE, 16);
         // A broadcast join is out of scope (M5.0), and at these sizes the planner would pick one
         // every time -- so the threshold goes to zero and the shuffle join is what gets built.
-        tEnv.getConfig()
-                .set(OptimizerConfigOptions.TABLE_OPTIMIZER_BROADCAST_JOIN_THRESHOLD, -1L);
+        tEnv.getConfig().set(OptimizerConfigOptions.TABLE_OPTIMIZER_BROADCAST_JOIN_THRESHOLD, -1L);
         // Flink 2.3 wraps a shuffle join in an AdaptiveJoin by default, which decides at runtime
         // whether to broadcast. That node is not offloaded -- see BatchExecHashJoin.substitute --
         // so the statically planned join is what these cases are about.
@@ -110,8 +109,7 @@ class AcceleratedJoinIT {
     void theJoinReachesTheAccelerator() {
         TestAcceleratorProvider.enable(10.0);
 
-        List<Row> rows =
-                run("SELECT f.k, f.val, d.label FROM fact f, dim d WHERE f.k = d.k");
+        List<Row> rows = run("SELECT f.k, f.val, d.label FROM fact f, dim d WHERE f.k = d.k");
 
         assertThat(TestAcceleratorProvider.PLANS_OFFERED.get())
                 .as("a join must be offered; before M5.5 the IR could not hold one")
@@ -159,7 +157,9 @@ class AcceleratedJoinIT {
             double val = ((Number) row.getField(1)).doubleValue();
             // label = 999 + k and val = k, so a row whose halves came from different pairs, or
             // whose fields were emitted in build order, fails here.
-            assertThat(label).as("label and val disagree about the key").isEqualTo(999L + (long) val);
+            assertThat(label)
+                    .as("label and val disagree about the key")
+                    .isEqualTo(999L + (long) val);
         }
     }
 
