@@ -38,6 +38,7 @@ import org.apache.flink.table.planner.plan.fusion.spec.CalcFusionCodegenSpec;
 import org.apache.flink.table.planner.plan.gpu.GpuCostEstimator;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
+import org.apache.flink.table.planner.plan.gpu.NumericalProvenance;
 import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
@@ -357,6 +358,11 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
      * the node was <em>eligible</em>, which is not the thing a restored plan would be reproducing.
      */
     @Override
+    public boolean computesApproximateValues() {
+        return NumericalProvenance.computesApproximateValues(projection, condition);
+    }
+
+    @Override
     protected StreamOperatorFactory<RowData> substituteOperator(
             PlannerBase planner,
             ExecNodeConfig config,
@@ -386,7 +392,11 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
                                 .get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE),
                         planner.getTableConfig()
                                 .get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
-        return new GpuOrCpuCalcOperatorFactory(spec, codeGenerated);
+        return new GpuOrCpuCalcOperatorFactory(
+                spec,
+                codeGenerated,
+                planner.getTableConfig()
+                        .get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MAX_PARALLELISM));
     }
 
     /**

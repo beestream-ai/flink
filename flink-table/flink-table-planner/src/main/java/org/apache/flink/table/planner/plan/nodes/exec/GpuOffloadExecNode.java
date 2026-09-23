@@ -83,6 +83,20 @@ public interface GpuOffloadExecNode {
      *
      * <p>Only meaningful when {@link #supportGpuOffload()} is true.
      */
+    /**
+     * Whether this node computes a value a device may round differently from Flink.
+     *
+     * <p>Consulted by {@code GpuOffloadProcessor} before a node is grouped. Under the strict
+     * default such a node is not offloaded at all, so no approximate value is ever produced and
+     * there is no provenance for the rest of the plan to lose track of.
+     *
+     * <p>Defaults to {@code false} — meaning "this node computes nothing that can drift" — because
+     * most nodes move rows rather than compute over them. A node that does compute must say so.
+     */
+    default boolean computesApproximateValues() {
+        return false;
+    }
+
     default RowCost estimateRowCost() {
         // Reached only if a node claims support without overriding this; naming the class makes
         // that mistake obvious in EXPLAIN rather than silently costing the node as free.

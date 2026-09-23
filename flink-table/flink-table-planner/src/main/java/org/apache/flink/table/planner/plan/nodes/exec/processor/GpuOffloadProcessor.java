@@ -22,6 +22,7 @@ import org.apache.flink.table.api.TableConfig;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
+import org.apache.flink.table.planner.plan.gpu.NumericalProvenance;
 import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
@@ -91,6 +92,9 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
 
         List<ExecNode<?>> order = topologicalOrder(execGraph);
         Map<ExecNode<?>, Integer> consumerCount = countConsumers(order);
+        Map<ExecNode<?>, List<ExecNode<?>>> consumers = consumersOf(order);
+        final boolean approximateProjectionsAllowed =
+                config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS);
         Map<ExecNode<?>, RowCost> costs = new IdentityHashMap<>();
         Map<ExecNode<?>, Integer> groupOf = new IdentityHashMap<>();
         Map<Integer, List<ExecNode<?>>> groups = new LinkedHashMap<>();
@@ -101,6 +105,40 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
         for (ExecNode<?> node : order) {
             if (!node.supportGpuOffload()) {
                 continue;
+            }
+            // The numerical-provenance contract, before anything about cost.
+            //
+            // Strict default: a node computing a drift-prone value is not offloaded, so the query
+            // returns Flink's numbers and no approximate value enters the plan for the rest of the
+            // analysis to track. Opt-in: the value may be computed, but only where it cannot reach
+            // anything that decides which rows come back or in what order -- membership stays
+            // Flink's either way. NumericalProvenance treats an unrecognised consumer as unsafe.
+            if (node.computesApproximateValues()) {
+                final String refusal;
+                if (!approximateProjectionsAllowed) {
+                    refusal =
+                            "computes a value a device may round differently from Flink (EXP, LN,"
+                                    + " SIN and the like); set"
+                                    + " table.exec.accelerator.approximate-projections to allow it, and"
+                                    + " read what that gives up";
+                } else if (!NumericalProvenance.reachesOnlyValueConsumers(node, consumers)) {
+                    refusal =
+                            "computes a value a device may round differently from Flink, and that"
+                                    + " value reaches a consumer that decides which rows are returned"
+                                    + " or in what order";
+                } else {
+                    refusal = null;
+                }
+                if (refusal != null) {
+                    assign(
+                            node,
+                            new GpuOffloadAssignment(
+                                    NO_GROUP,
+                                    decision.forSubtree(
+                                            Collections.singletonList(
+                                                    RowCost.ineligible(refusal)))));
+                    continue;
+                }
             }
             RowCost cost = node.estimateRowCost();
             if (!cost.isEligible()) {
@@ -301,6 +339,23 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
                 };
         graph.getRootNodes().forEach(node -> node.accept(visitor));
         return order;
+    }
+
+    /**
+     * The forward edges, which an {@code ExecNode} graph does not carry.
+     *
+     * <p>Each node lists its inputs, so the consumers of a node have to be collected by walking
+     * every node once and inverting. Identity-keyed, like the rest of the maps here: two exec nodes
+     * can be equal without being the same node in the graph.
+     */
+    private static Map<ExecNode<?>, List<ExecNode<?>>> consumersOf(List<ExecNode<?>> order) {
+        Map<ExecNode<?>, List<ExecNode<?>>> consumers = new IdentityHashMap<>();
+        for (ExecNode<?> node : order) {
+            for (ExecNode<?> input : inputsOf(node)) {
+                consumers.computeIfAbsent(input, unused -> new ArrayList<>()).add(node);
+            }
+        }
+        return consumers;
     }
 
     private static Map<ExecNode<?>, Integer> countConsumers(List<ExecNode<?>> order) {
