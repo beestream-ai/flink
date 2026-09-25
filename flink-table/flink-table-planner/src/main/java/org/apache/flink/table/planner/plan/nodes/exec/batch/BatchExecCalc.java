@@ -363,6 +363,16 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
     }
 
     @Override
+    public java.util.Set<Integer> approximateColumns() {
+        return NumericalProvenance.approximateColumns(projection, condition);
+    }
+
+    @Override
+    public java.util.Set<Integer> forwardDrift(java.util.Set<Integer> incoming) {
+        return NumericalProvenance.forwardDrift(projection, condition, incoming);
+    }
+
+    @Override
     protected StreamOperatorFactory<RowData> substituteOperator(
             PlannerBase planner,
             ExecNodeConfig config,

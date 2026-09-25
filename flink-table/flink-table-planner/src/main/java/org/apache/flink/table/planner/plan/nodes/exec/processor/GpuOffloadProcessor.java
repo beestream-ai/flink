@@ -30,7 +30,9 @@ import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeGraph;
 import org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecAcceleratedGroup;
+import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecAcceleratedSort;
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecHashAggregate;
+import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecSort;
 import org.apache.flink.table.planner.plan.nodes.exec.common.CommonExecCalc;
 import org.apache.flink.table.planner.plan.nodes.exec.visitor.AbstractExecNodeExactlyOnceVisitor;
 import org.apache.flink.table.types.logical.RowType;
@@ -121,7 +123,8 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
                                     + " SIN and the like); set"
                                     + " table.exec.accelerator.approximate-projections to allow it, and"
                                     + " read what that gives up";
-                } else if (!NumericalProvenance.reachesOnlyValueConsumers(node, consumers)) {
+                } else if (!NumericalProvenance.reachesOnlyValueConsumers(
+                        node, consumers, node.approximateColumns())) {
                     refusal =
                             "computes a value a device may round differently from Flink, and that"
                                     + " value reaches a consumer that decides which rows are returned"
@@ -204,13 +207,18 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
      */
     private static ExecNodeGraph fuse(
             ExecNodeGraph execGraph, Map<ExecNode<?>, Integer> groupOf, TableConfig config) {
-        if (!config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_FUSE_AGGREGATE)) {
-            return execGraph;
-        }
+        // The aggregate's gate is per-kind, not global, and the difference matters. It defaults to
+        // off because M4.0 measured a *CPU* fused pair as worth nothing while fusing took away the
+        // projection's own accelerator path -- a bad trade while the fused pair had no device
+        // route. A fused sort does have one: GpuProjectedSortOperator runs the kernel and
+        // cudf::sorted_order in one task graph, so the projection's output is never copied back.
+        // Gating that on an option named for the aggregate would turn off the thing it exists for.
+        final boolean fuseAggregate =
+                config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_FUSE_AGGREGATE);
         List<ExecNode<?>> newRoots = new ArrayList<>();
         Map<ExecNode<?>, ExecNode<?>> rewritten = new IdentityHashMap<>();
         for (ExecNode<?> root : execGraph.getRootNodes()) {
-            newRoots.add(rewrite(root, groupOf, rewritten));
+            newRoots.add(rewrite(root, groupOf, rewritten, fuseAggregate));
         }
         return new ExecNodeGraph(execGraph.getFlinkVersion(), newRoots);
     }
@@ -219,34 +227,45 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
     private static ExecNode<?> rewrite(
             ExecNode<?> node,
             Map<ExecNode<?>, Integer> groupOf,
-            Map<ExecNode<?>, ExecNode<?>> rewritten) {
+            Map<ExecNode<?>, ExecNode<?>> rewritten,
+            boolean fuseAggregate) {
         ExecNode<?> already = rewritten.get(node);
         if (already != null) {
             return already;
         }
         List<ExecEdge> edges = node.getInputEdges();
         for (int i = 0; i < edges.size(); i++) {
-            ExecNode<?> newSource = rewrite(edges.get(i).getSource(), groupOf, rewritten);
+            ExecNode<?> newSource =
+                    rewrite(edges.get(i).getSource(), groupOf, rewritten, fuseAggregate);
             if (newSource != edges.get(i).getSource()) {
                 node.replaceInputEdge(i, ExecEdge.builder().source(newSource).target(node).build());
             }
         }
-        ExecNode<?> result = fuseIfPossible(node, groupOf);
+        ExecNode<?> result = fuseIfPossible(node, groupOf, fuseAggregate);
         rewritten.put(node, result);
         return result;
     }
 
     /** The fused node, or the node unchanged. */
-    private static ExecNode<?> fuseIfPossible(ExecNode<?> node, Map<ExecNode<?>, Integer> groupOf) {
-        if (node.isCompiled() || !(node instanceof BatchExecHashAggregate)) {
+    private static ExecNode<?> fuseIfPossible(
+            ExecNode<?> node, Map<ExecNode<?>, Integer> groupOf, boolean fuseAggregate) {
+        if (node.isCompiled()) {
             return node;
         }
-        BatchExecHashAggregate aggregate = (BatchExecHashAggregate) node;
-        GpuOffloadAssignment mine = aggregate.getGpuOffloadAssignment();
+        // Two terminal kinds can absorb the projection beneath them. Both are the same rewrite and
+        // both exist for the same reason: left as two nodes they become two task graphs, and the
+        // projection's output crosses the bus and comes straight back rather than being read where
+        // it lies. A chain of Calcs needs no rewrite -- the grouping already turns those into one
+        // subtree and the generator into one kernel -- so a maximal chain is a run of Calcs and at
+        // most one of these on top.
+        if (!(node instanceof BatchExecHashAggregate) && !(node instanceof BatchExecSort)) {
+            return node;
+        }
+        GpuOffloadAssignment mine = node.getGpuOffloadAssignment();
         if (mine == null || !mine.isOffloaded()) {
             return node;
         }
-        ExecNode<?> input = aggregate.getInputEdges().get(0).getSource();
+        ExecNode<?> input = node.getInputEdges().get(0).getSource();
         if (!(input instanceof CommonExecCalc)) {
             return node;
         }
@@ -255,6 +274,32 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
             return node;
         }
         CommonExecCalc calc = (CommonExecCalc) input;
+        if (node instanceof BatchExecSort) {
+            BatchExecSort sort = (BatchExecSort) node;
+            BatchExecAcceleratedSort fusedSort =
+                    new BatchExecAcceleratedSort(
+                            calc,
+                            sort,
+                            InputProperty.DEFAULT,
+                            (RowType) sort.getOutputType(),
+                            "AcceleratedSort("
+                                    + calc.getDescription()
+                                    + ", "
+                                    + sort.getDescription()
+                                    + ")");
+            fusedSort.setInputEdges(
+                    Collections.singletonList(
+                            ExecEdge.builder()
+                                    .source(calc.getInputEdges().get(0).getSource())
+                                    .target(fusedSort)
+                                    .build()));
+            fusedSort.setGpuOffloadAssignment(mine);
+            return fusedSort;
+        }
+        if (!fuseAggregate) {
+            return node;
+        }
+        BatchExecHashAggregate aggregate = (BatchExecHashAggregate) node;
         BatchExecAcceleratedGroup fused =
                 new BatchExecAcceleratedGroup(
                         calc,

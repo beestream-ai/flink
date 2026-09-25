@@ -123,6 +123,30 @@ public class BatchExecSort extends ExecNodeBase<RowData>
                 new SortCodeGenerator(
                         config, planner.getFlinkContext().getClassLoader(), inputType, sortSpec);
 
+        GeneratedSort generated = generateSortOperator(planner, config);
+        return ExecNodeUtil.createOneInputTransformation(
+                inputTransform,
+                createTransformationMeta(SORT_TRANSFORMATION, config),
+                substitute(config, inputType, generated.factory),
+                InternalTypeInfo.of((RowType) getOutputType()),
+                inputTransform.getParallelism(),
+                generated.managedMemory,
+                false);
+    }
+
+    /**
+     * Flink's own sort operator, and the managed memory it needs.
+     *
+     * <p>Exposed so {@link BatchExecAcceleratedSort} can build the same operator for the CPU half
+     * of a fused pair, the way {@code BatchExecHashAggregate.generateAggregateOperator} is exposed
+     * for the fused aggregate. Duplicating the construction there instead would mean two places
+     * that have to agree about spill handles, compression and merge settings.
+     */
+    GeneratedSort generateSortOperator(PlannerBase planner, ExecNodeConfig config) {
+        RowType inputType = (RowType) getInputEdges().get(0).getOutputType();
+        SortCodeGenerator codeGen =
+                new SortCodeGenerator(
+                        config, planner.getFlinkContext().getClassLoader(), inputType, sortSpec);
         SortOperator operator =
                 new SortOperator(
                         codeGen.generateNormalizedKeyComputer("BatchExecSortComputer"),
@@ -137,15 +161,23 @@ public class BatchExecSort extends ExecNodeBase<RowData>
                         config.get(ExecutionConfigOptions.TABLE_EXEC_SORT_ASYNC_MERGE_ENABLED));
         long sortMemory =
                 config.get(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_SORT_MEMORY).getBytes();
+        return new GeneratedSort(SimpleOperatorFactory.of(operator), sortMemory);
+    }
 
-        return ExecNodeUtil.createOneInputTransformation(
-                inputTransform,
-                createTransformationMeta(SORT_TRANSFORMATION, config),
-                substitute(config, inputType, SimpleOperatorFactory.of(operator)),
-                InternalTypeInfo.of((RowType) getOutputType()),
-                inputTransform.getParallelism(),
-                sortMemory,
-                false);
+    /** Flink's sort operator paired with the managed memory it has to be given. */
+    static final class GeneratedSort {
+        final StreamOperatorFactory<RowData> factory;
+        final long managedMemory;
+
+        GeneratedSort(StreamOperatorFactory<RowData> factory, long managedMemory) {
+            this.factory = factory;
+            this.managedMemory = managedMemory;
+        }
+    }
+
+    /** The sort key, for the fused node that owns this sort. */
+    SortSpec sortSpec() {
+        return sortSpec;
     }
 
     /**

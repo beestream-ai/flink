@@ -97,6 +97,42 @@ public interface GpuOffloadExecNode {
         return false;
     }
 
+    /**
+     * Which of this node's output columns may drift, by index.
+     *
+     * <p>Lets the provenance analysis ask about a column rather than a node, which matters for one
+     * shape: a grouped aggregate decides group membership from its grouping keys alone, so a
+     * drifting value feeding only an aggregate call changes what a group sums to and not which
+     * group a row lands in.
+     *
+     * <p>Empty by default, which is consistent with {@link #computesApproximateValues} defaulting
+     * to false. A node that drifts but does not say which columns is treated as drifting in all of
+     * them.
+     */
+    default java.util.Set<Integer> approximateColumns() {
+        return java.util.Collections.emptySet();
+    }
+
+    /**
+     * Where drift arriving on these input columns ends up in this node's output, or null when this
+     * node cannot say.
+     *
+     * <p>The provenance walk is forward, and every node it crosses re-indexes the row. Without a
+     * mapping the walk has to fall back to "assume every column drifts" at the first node it does
+     * not understand, and from there it refuses everything downstream -- which is what made
+     * {@code SELECT COUNT(*), SUM(g) FROM (SELECT k, SUM(km) AS km ... GROUP BY k)} unofferable
+     * even though nothing in it groups, filters or orders by a drifting value.
+     *
+     * <p>Null is the conservative answer and the default: it does not by itself refuse the node,
+     * it only costs the precision of the question asked about everything beyond it.
+     *
+     * @param incoming drifting column indexes in this node's <em>input</em> row
+     */
+    @org.apache.flink.annotation.Experimental
+    default java.util.Set<Integer> forwardDrift(java.util.Set<Integer> incoming) {
+        return null;
+    }
+
     default RowCost estimateRowCost() {
         // Reached only if a node claims support without overriding this; naming the class makes
         // that mistake obvious in EXPLAIN rather than silently costing the node as free.

@@ -249,6 +249,31 @@ public final class AccelIrBuilder {
     }
 
     /**
+     * The same sort, over a projection rather than over the operator's input.
+     *
+     * <p>What makes a fused pair one subtree instead of two. An unfused sort is handed an {@link
+     * AccelInput} leaf and a provider has no way to know a projection preceded it, so the two nodes
+     * become two task graphs and the projection's output crosses the bus and comes straight back.
+     * Nesting the projection lets a provider compile one kernel and order its output where it lies.
+     *
+     * <p>A sort does not change the schema, so the output type is the projection's.
+     */
+    public static Optional<AccelNode> buildSort(
+            SortSpec sortSpec, AccelNode input, RowType outputType) {
+        if (sortSpec.getFieldSize() != 1) {
+            return Optional.empty();
+        }
+        SortSpec.SortFieldSpec field = sortSpec.getFieldSpec(0);
+        return Optional.of(
+                new AccelSort(
+                        field.getFieldIndex(),
+                        field.getIsAscendingOrder(),
+                        field.getNullIsLast(),
+                        input,
+                        outputType));
+    }
+
+    /**
      * Builds the IR for an inner equi-join, or empty where the shape is not describable.
      *
      * <p>Takes its inputs in build/probe order, which is the order the transformation puts them in

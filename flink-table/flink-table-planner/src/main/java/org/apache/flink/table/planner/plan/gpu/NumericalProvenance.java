@@ -19,8 +19,11 @@
 package org.apache.flink.table.planner.plan.gpu;
 
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
+import org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode;
+import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 
 import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexVisitorImpl;
 import org.apache.calcite.sql.SqlOperator;
@@ -118,6 +121,72 @@ public final class NumericalProvenance {
         return condition != null && isApproximate(condition);
     }
 
+    /**
+     * Which output columns of this projection may drift, by index.
+     *
+     * <p>A condition that drifts poisons the whole node rather than a column — it decides rows
+     * directly — and is reported as every column, so a caller cannot conclude anything is safe.
+     */
+    public static Set<Integer> approximateColumns(
+            List<RexNode> projection, @Nullable RexNode condition) {
+        if (condition != null && isApproximate(condition)) {
+            final Set<Integer> all = new HashSet<>();
+            for (int i = 0; i < projection.size(); i++) {
+                all.add(i);
+            }
+            return all;
+        }
+        final Set<Integer> drifting = new HashSet<>();
+        for (int i = 0; i < projection.size(); i++) {
+            if (isApproximate(projection.get(i))) {
+                drifting.add(i);
+            }
+        }
+        return drifting;
+    }
+
+    /**
+     * Where drift on these input columns lands in a projection's output.
+     *
+     * <p>An output column drifts if its expression reads a drifting input column, or if it
+     * computes a drift-prone function of its own — the second case is what makes this composable,
+     * since a chain of projections each adding a little is the normal shape.
+     *
+     * <p>Null when the condition reads a drifting column: that is a filter deciding rows from a
+     * value the device rounds differently, which is the case this whole analysis exists to refuse.
+     */
+    @Nullable
+    public static Set<Integer> forwardDrift(
+            List<RexNode> projection, @Nullable RexNode condition, Set<Integer> incoming) {
+        if (condition != null && (reads(condition, incoming) || isApproximate(condition))) {
+            return null;
+        }
+        final Set<Integer> forwarded = new HashSet<>();
+        for (int i = 0; i < projection.size(); i++) {
+            final RexNode expression = projection.get(i);
+            if (reads(expression, incoming) || isApproximate(expression)) {
+                forwarded.add(i);
+            }
+        }
+        return forwarded;
+    }
+
+    /** Whether an expression reads any of these input columns. */
+    private static boolean reads(RexNode expression, Set<Integer> columns) {
+        final boolean[] found = {false};
+        expression.accept(
+                new RexVisitorImpl<Void>(true) {
+                    @Override
+                    public Void visitInputRef(RexInputRef input) {
+                        if (columns.contains(input.getIndex())) {
+                            found[0] = true;
+                        }
+                        return null;
+                    }
+                });
+        return found[0];
+    }
+
     private static boolean isApproximate(RexNode node) {
         final boolean[] found = {false};
         node.accept(
@@ -148,23 +217,172 @@ public final class NumericalProvenance {
      */
     public static boolean reachesOnlyValueConsumers(
             ExecNode<?> node, java.util.Map<ExecNode<?>, List<ExecNode<?>>> consumers) {
-        final java.util.Deque<ExecNode<?>> pending = new java.util.ArrayDeque<>();
+        return reachesOnlyValueConsumers(node, consumers, null);
+    }
+
+    /**
+     * The same question, asked of particular columns.
+     *
+     * <p>Node granularity refuses more than it has to in one shape that matters: a grouped
+     * aggregate decides membership <em>of groups</em>, and the groups are decided by its grouping
+     * keys alone. A drifting value that feeds only an aggregate call cannot move a row into a
+     * different group — it changes what the group sums to, which is a value. The unqualified form
+     * treats the whole node as unsafe and so refuses
+     * {@code SELECT k, SUM(haversine(...)) ... GROUP BY k}, where {@code k} is untouched.
+     *
+     * <p>{@code drifting} is indexed into this node's output row, which is the aggregate's input
+     * row, so the grouping keys are in the same index space. Null means "assume every column", and
+     * the analysis falls back to node granularity — which is what a consumer more than one step
+     * away gets, since the mapping between index spaces is not tracked across a node.
+     */
+    public static boolean reachesOnlyValueConsumers(
+            ExecNode<?> node,
+            java.util.Map<ExecNode<?>, List<ExecNode<?>>> consumers,
+            @Nullable Set<Integer> drifting) {
+        final java.util.Deque<Reach> pending = new java.util.ArrayDeque<>();
         final Set<ExecNode<?>> seen =
                 java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
-        pending.add(node);
+        pending.add(new Reach(node, drifting));
         seen.add(node);
         while (!pending.isEmpty()) {
-            final ExecNode<?> current = pending.poll();
-            for (ExecNode<?> consumer : consumers.getOrDefault(current, java.util.List.of())) {
-                if (!isValueOnly(consumer)) {
+            final Reach current = pending.poll();
+            for (ExecNode<?> consumer : consumers.getOrDefault(current.node, java.util.List.of())) {
+                final Set<Integer> forwarded = forward(consumer, current.drifting);
+                if (!isValueOnly(consumer) && forwarded == null) {
                     return false;
                 }
                 if (seen.add(consumer)) {
-                    pending.add(consumer);
+                    pending.add(new Reach(consumer, forwarded));
                 }
             }
         }
         return true;
+    }
+
+    /** A node reached by the walk, and which of its output columns carry the drift. */
+    private static final class Reach {
+        private final ExecNode<?> node;
+        private final @Nullable Set<Integer> drifting;
+
+        private Reach(ExecNode<?> node, @Nullable Set<Integer> drifting) {
+            this.node = node;
+            this.drifting = drifting;
+        }
+    }
+
+    /**
+     * Where drift on these columns lands in the consumer's output row, or null when unknown.
+     *
+     * <p>Three mappings are known, and they are the three the walk has to cross to get from a
+     * projection to a sink: an exchange leaves the row alone, a node that can describe its own
+     * projection is asked, and a grouped aggregate moves the drift to where its calls land.
+     * Anything else is unknown, which is not by itself a refusal — see the caller.
+     */
+    private static @Nullable Set<Integer> forward(
+            ExecNode<?> consumer, @Nullable Set<Integer> drifting) {
+        if (drifting == null) {
+            return null;
+        }
+        if (drifting.isEmpty()) {
+            // Nothing drifts here and nothing downstream can start drifting on its own.
+            return drifting;
+        }
+        if (isExchange(consumer)) {
+            // A hash exchange whose keys drift sends a row to a different subtask, which is a
+            // membership decision made with a drifting value however the consumer behaves.
+            final int[] keys = partitionKeysOf(consumer);
+            if (keys != null) {
+                for (int key : keys) {
+                    if (drifting.contains(key)) {
+                        return null;
+                    }
+                }
+            }
+            return drifting;
+        }
+        if (consumer instanceof GpuOffloadExecNode) {
+            final Set<Integer> mapped = ((GpuOffloadExecNode) consumer).forwardDrift(drifting);
+            if (mapped != null) {
+                return mapped;
+            }
+        }
+        return throughAggregate(consumer, drifting);
+    }
+
+    private static boolean isExchange(ExecNode<?> consumer) {
+        return consumer.getClass().getSimpleName().endsWith("Exchange");
+    }
+
+    /**
+     * A hash exchange's partition keys, or null when it does not partition by value.
+     *
+     * <p>Read off the required distribution rather than reflectively: {@code InputProperty} is the
+     * declared shape of the edge and is the thing that actually decides the partitioning.
+     */
+    @Nullable
+    private static int[] partitionKeysOf(ExecNode<?> consumer) {
+        for (InputProperty property : consumer.getInputProperties()) {
+            final InputProperty.RequiredDistribution distribution =
+                    property.getRequiredDistribution();
+            if (distribution instanceof InputProperty.HashDistribution) {
+                return ((InputProperty.HashDistribution) distribution).getKeys();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Where the drift goes after a grouped aggregate, or null if the aggregate is not safe.
+     *
+     * <p>A grouped aggregate decides membership of groups, and the groups come from the grouping
+     * keys alone. If none of them drifts, a row cannot land in a different group — the drift only
+     * changes what each group sums to. That is a value, and it survives into the output at the
+     * positions the aggregate calls occupy, which follow the grouping keys.
+     *
+     * <p>Returning the forwarded set rather than a boolean is what lets the walk cross the local
+     * aggregate, the exchange and the global aggregate of a two-phase {@code GROUP BY}: each step
+     * re-expresses the drift in the next node's index space instead of giving up on it. Giving up
+     * is what refused {@code SELECT k, SUM(haversine(...)) FROM t GROUP BY k}, whose grouping key
+     * is untouched.
+     */
+    private static @Nullable Set<Integer> throughAggregate(
+            ExecNode<?> consumer, @Nullable Set<Integer> drifting) {
+        if (drifting == null || !consumer.getClass().getSimpleName().endsWith("Aggregate")) {
+            return null;
+        }
+        final int[] grouping = groupingOf(consumer);
+        if (grouping == null) {
+            return null;
+        }
+        for (int key : grouping) {
+            if (drifting.contains(key)) {
+                return null;
+            }
+        }
+        final int arity = consumer.getOutputType().getChildren().size();
+        final Set<Integer> forwarded = new HashSet<>();
+        for (int i = grouping.length; i < arity; i++) {
+            forwarded.add(i);
+        }
+        return forwarded;
+    }
+
+    /** The grouping keys, read reflectively; null when absent or unreadable — the safe direction. */
+    @Nullable
+    private static int[] groupingOf(ExecNode<?> consumer) {
+        for (Class<?> type = consumer.getClass(); type != null; type = type.getSuperclass()) {
+            try {
+                final java.lang.reflect.Field field = type.getDeclaredField("grouping");
+                field.setAccessible(true);
+                final Object grouping = field.get(consumer);
+                return grouping instanceof int[] ? (int[]) grouping : null;
+            } catch (NoSuchFieldException keepLooking) {
+                continue;
+            } catch (ReflectiveOperationException | RuntimeException notVisible) {
+                return null;
+            }
+        }
+        return null;
     }
 
     /**
@@ -186,7 +404,8 @@ public final class NumericalProvenance {
         if (kind.endsWith("Aggregate")) {
             // An aggregate with no grouping keys produces one row whatever the values are: it
             // cannot put a row in a different group, because there is only one. An aggregate WITH
-            // grouping keys decides membership of groups and is not value-only.
+            // grouping keys decides membership of groups, and whether that matters depends on
+            // which columns drift -- see throughAggregate.
             return isUngrouped(consumer);
         }
         if (kind.endsWith("Exchange")) {
@@ -200,18 +419,12 @@ public final class NumericalProvenance {
     /**
      * Whether an aggregate-like node groups by anything.
      *
-     * <p>Read reflectively, like the condition above, and absent or unreadable means "assume it
-     * groups" — the safe direction for a check whose whole job is to be conservative.
+     * <p>Absent or unreadable grouping means "assume it groups" — the safe direction for a check
+     * whose whole job is to be conservative.
      */
     private static boolean isUngrouped(ExecNode<?> consumer) {
-        try {
-            final java.lang.reflect.Field field = consumer.getClass().getDeclaredField("grouping");
-            field.setAccessible(true);
-            final Object grouping = field.get(consumer);
-            return grouping instanceof int[] && ((int[]) grouping).length == 0;
-        } catch (ReflectiveOperationException | RuntimeException notVisible) {
-            return false;
-        }
+        final int[] grouping = groupingOf(consumer);
+        return grouping != null && grouping.length == 0;
     }
 
     /**

@@ -31,6 +31,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -127,5 +128,77 @@ class NumericalProvenanceTest {
 
     private RexNode literal() {
         return rex.makeLiteral(0.5, typeFactory.createSqlType(SqlTypeName.DOUBLE), false);
+    }
+
+    @Test
+    @DisplayName("drift forwards to the output columns whose expressions read it")
+    void driftForwardsThroughAProjection() {
+        // in: [0] = clean, [1] = drifting. Out: pass [1] through, and combine [0] with [1].
+        final RexNode clean = rex.makeInputRef(doubleType(), 0);
+        final RexNode dirty = rex.makeInputRef(doubleType(), 1);
+        final List<RexNode> projection =
+                List.of(
+                        clean,
+                        dirty,
+                        rex.makeCall(SqlStdOperatorTable.PLUS, clean, dirty),
+                        rex.makeCall(SqlStdOperatorTable.PLUS, clean, clean));
+
+        assertThat(NumericalProvenance.forwardDrift(projection, null, Set.of(1)))
+                .withFailMessage(
+                        "a column drifts if its expression reads a drifting input, and only then")
+                .containsExactlyInAnyOrder(1, 2);
+    }
+
+    @Test
+    @DisplayName("a projection that computes a transcendental of its own starts the drift")
+    void aFreshTranscendentalDrifts() {
+        final RexNode clean = rex.makeInputRef(doubleType(), 0);
+        final List<RexNode> projection =
+                List.of(clean, rex.makeCall(SqlStdOperatorTable.SIN, clean));
+
+        // Nothing is drifting on the way in, so this is the composability case: a chain of
+        // projections each adding a little has to accumulate rather than reset at every node.
+        assertThat(NumericalProvenance.forwardDrift(projection, null, Set.of()))
+                .containsExactly(1);
+    }
+
+    @Test
+    @DisplayName("a filter reading a drifting column forwards nothing, because it decides rows")
+    void aFilterOverDriftIsUnknown() {
+        final RexNode clean = rex.makeInputRef(doubleType(), 0);
+        final RexNode dirty = rex.makeInputRef(doubleType(), 1);
+        final RexNode condition =
+                rex.makeCall(
+                        SqlStdOperatorTable.GREATER_THAN,
+                        dirty,
+                        rex.makeLiteral(
+                                java.math.BigDecimal.ONE,
+                                doubleType(),
+                                true));
+
+        // Null rather than an empty set: an empty set would say "nothing downstream drifts", and
+        // the rows reaching downstream are already the wrong ones.
+        assertThat(NumericalProvenance.forwardDrift(List.of(clean, dirty), condition, Set.of(1)))
+                .withFailMessage("a WHERE over a drifting value is the case this analysis refuses")
+                .isNull();
+    }
+
+    @Test
+    @DisplayName("a filter that does not read the drift lets it through")
+    void aFilterElsewhereIsFine() {
+        final RexNode clean = rex.makeInputRef(doubleType(), 0);
+        final RexNode dirty = rex.makeInputRef(doubleType(), 1);
+        final RexNode condition =
+                rex.makeCall(
+                        SqlStdOperatorTable.GREATER_THAN,
+                        clean,
+                        rex.makeLiteral(java.math.BigDecimal.ONE, doubleType(), true));
+
+        assertThat(NumericalProvenance.forwardDrift(List.of(clean, dirty), condition, Set.of(1)))
+                .containsExactly(1);
+    }
+
+    private org.apache.calcite.rel.type.RelDataType doubleType() {
+        return typeFactory.createSqlType(SqlTypeName.DOUBLE);
     }
 }
