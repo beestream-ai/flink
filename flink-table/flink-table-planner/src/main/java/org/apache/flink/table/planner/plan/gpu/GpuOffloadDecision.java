@@ -70,6 +70,16 @@ public final class GpuOffloadDecision {
         }
 
         /**
+         * The same verdict over a different work description.
+         *
+         * <p>Exists so the processor can add a requirement the cost analysis knows nothing about
+         * -- that the arithmetic round the way the CPU's does -- without rebuilding the decision.
+         */
+        public Verdict withWork(AccelWorkProfile replacement) {
+            return new Verdict(offload, replacement, reason);
+        }
+
+        /**
          * Whether this subtree is <em>eligible</em>. Not whether it will run on a device: that is
          * settled per subtask, on the TaskManager, against a provider that can see the hardware.
          */

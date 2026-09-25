@@ -179,6 +179,9 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
                 memberCosts.add(costs.get(member));
             }
             GpuOffloadDecision.Verdict verdict = decision.forSubtree(memberCosts);
+            verdict =
+                    requireStrictArithmeticIfObservable(
+                            verdict, entry.getValue(), consumers, approximateProjectionsAllowed);
             for (ExecNode<?> member : entry.getValue()) {
                 assign(member, new GpuOffloadAssignment(entry.getKey(), verdict));
             }
@@ -314,6 +317,66 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
 
     private static double rowCountOf(ExecNode<?> node) {
         return node.getEstimatedRowCount();
+    }
+
+    /**
+     * Marks a group's work as needing the CPU's floating-point rounding, where the difference could
+     * be observed.
+     *
+     * <p>An accelerator may evaluate {@code a * b + c} as one fused operation with a single
+     * rounding. That is a more accurate answer than Flink's two roundings and a <em>different</em>
+     * one, and unlike a transcendental it cannot be spotted by looking for a function name:
+     * {@code -}, {@code *} and {@code +} are each exact under IEEE 754, and it is their
+     * <em>composition</em> that a device is free to round differently. Measured on this project on
+     * a query containing no transcendental at all, the CPU returned 24 rows and the device 23.
+     *
+     * <p>So the question is not what the expression contains but where its value goes. If it
+     * reaches only consumers that pass values through, a difference in the last bits changes an
+     * output column and nothing else. If it reaches a filter, a join condition, a grouping key, a
+     * sort key or a limit, it decides which rows come back — and then the same SQL answers
+     * differently depending on which machine ran it.
+     *
+     * <p>{@link NumericalProvenance} already answers that question for transcendentals, and it
+     * answers this one unchanged: a {@code Calc} with a condition, a grouped aggregate and anything
+     * it does not recognise — a sort, a join, a limit, a rank — are all not value-only.
+     *
+     * <p>Two reasons to require it, and the first is not about reach at all. When
+     * {@code approximate-projections} is off — the default — the deployment has asked for values
+     * that match Flink's, and a fused multiply-add does not match them whether or not anything
+     * downstream looks. When it is on, value drift is accepted and only membership is left to
+     * protect, which is the reach question below.
+     *
+     * <p>Deliberately per group rather than per column. Tracking which output column a consumer
+     * actually keys on would let a query that sorts on an untouched column keep its fused
+     * arithmetic; not tracking it costs that query the fused instruction and costs a wrong answer
+     * nothing. The cheap direction here is the safe one.
+     *
+     * <p>This marks rather than refuses. A provider that can honour the request offloads the
+     * subtree and rounds the way Flink does; one that cannot must decline it.
+     */
+    private static GpuOffloadDecision.Verdict requireStrictArithmeticIfObservable(
+            GpuOffloadDecision.Verdict verdict,
+            List<ExecNode<?>> members,
+            Map<ExecNode<?>, List<ExecNode<?>>> consumers,
+            boolean approximateProjectionsAllowed) {
+        if (verdict.work() == null || verdict.work().requiresStrictArithmetic()) {
+            return verdict;
+        }
+        if (!approximateProjectionsAllowed) {
+            // The deployment has not opted into values that differ from Flink's, and a fused
+            // multiply-add differs from Flink's. approximate-projections governs the library
+            // functions -- EXP, LN, SIN -- because those are what the analysis can name, but the
+            // guarantee it describes is about output values, and arithmetic fusion breaks the same
+            // guarantee without any of those appearing in the expression. Nothing downstream has
+            // to observe it for this to matter: the user asked for the CPU's numbers.
+            return verdict.withWork(verdict.work().withStrictArithmetic());
+        }
+        for (ExecNode<?> member : members) {
+            if (!NumericalProvenance.reachesOnlyValueConsumers(member, consumers)) {
+                return verdict.withWork(verdict.work().withStrictArithmetic());
+            }
+        }
+        return verdict;
     }
 
     private static void assign(ExecNode<?> node, GpuOffloadAssignment assignment) {

@@ -57,8 +57,39 @@ public final class AccelWorkProfile implements Serializable {
     private final int outputBytesPerRow;
     private final long estimatedRows;
 
+    /**
+     * Whether this subtree must compute floating-point arithmetic the way Flink's CPU operator
+     * does, rather than as fast as the accelerator can.
+     *
+     * <p>An accelerator is free to evaluate {@code a * b + c} as one fused operation with a single
+     * rounding. That is a more accurate answer than Flink's two roundings and a <em>different</em>
+     * one, and where the difference can reach a filter, a join condition, a grouping key, a sort
+     * key or a limit it decides which rows the query returns. The same SQL would then answer
+     * differently depending on which machine the scheduler picked, which is the one thing offload
+     * may not do.
+     *
+     * <p>The planner decides this, not the provider: whether a computed column reaches such an
+     * operator is a question about the surrounding graph, and only {@code GpuOffloadProcessor} can
+     * see it. A provider that cannot honour the request must decline the subtree rather than
+     * offload it anyway -- returning a fast answer that differs from the CPU's is the failure this
+     * flag exists to prevent.
+     *
+     * <p>False does not mean "fusion is wanted". It means nothing downstream can observe the
+     * difference, so the provider may choose.
+     */
+    private final boolean strictArithmetic;
+
     public AccelWorkProfile(
             int[] opsPerRow, int inputBytesPerRow, int outputBytesPerRow, long estimatedRows) {
+        this(opsPerRow, inputBytesPerRow, outputBytesPerRow, estimatedRows, false);
+    }
+
+    public AccelWorkProfile(
+            int[] opsPerRow,
+            int inputBytesPerRow,
+            int outputBytesPerRow,
+            long estimatedRows,
+            boolean strictArithmetic) {
         if (opsPerRow.length != AccelFunction.values().length) {
             throw new IllegalArgumentException(
                     "opsPerRow must have one slot per AccelFunction: expected "
@@ -70,6 +101,20 @@ public final class AccelWorkProfile implements Serializable {
         this.inputBytesPerRow = inputBytesPerRow;
         this.outputBytesPerRow = outputBytesPerRow;
         this.estimatedRows = estimatedRows;
+        this.strictArithmetic = strictArithmetic;
+    }
+
+    /** See {@link #strictArithmetic}. */
+    public boolean requiresStrictArithmetic() {
+        return strictArithmetic;
+    }
+
+    /** The same work, but requiring the CPU's rounding. */
+    public AccelWorkProfile withStrictArithmetic() {
+        return strictArithmetic
+                ? this
+                : new AccelWorkProfile(
+                        opsPerRow, inputBytesPerRow, outputBytesPerRow, estimatedRows, true);
     }
 
     /** How many times this subtree applies {@code function} to each input row. */
@@ -100,7 +145,10 @@ public final class AccelWorkProfile implements Serializable {
                 sum,
                 Math.max(inputBytesPerRow, other.inputBytesPerRow),
                 other.outputBytesPerRow,
-                rows);
+                rows,
+                // Strictness is a requirement, so it survives grouping: if either member of a
+                // group must round the way the CPU does, the kernel they compile into must.
+                strictArithmetic || other.strictArithmetic);
     }
 
     /** Every count, indexed by {@link AccelFunction#ordinal()}. */
@@ -161,6 +209,7 @@ public final class AccelWorkProfile implements Serializable {
                 .append(outputBytesPerRow)
                 .append("B/row, rows=")
                 .append(estimatedRows == UNKNOWN_ROWS ? "unknown" : estimatedRows)
+                .append(strictArithmetic ? ", strict arithmetic" : "")
                 .append(']')
                 .toString();
     }
@@ -174,7 +223,8 @@ public final class AccelWorkProfile implements Serializable {
         return Arrays.equals(opsPerRow, other.opsPerRow)
                 && inputBytesPerRow == other.inputBytesPerRow
                 && outputBytesPerRow == other.outputBytesPerRow
-                && estimatedRows == other.estimatedRows;
+                && estimatedRows == other.estimatedRows
+                && strictArithmetic == other.strictArithmetic;
     }
 
     @Override

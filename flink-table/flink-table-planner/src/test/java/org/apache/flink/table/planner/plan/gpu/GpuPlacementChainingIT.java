@@ -62,6 +62,7 @@ class GpuPlacementChainingIT {
                 "CREATE TABLE t (id BIGINT NOT NULL, val DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '1000')");
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         tEnv.getConfig()
                 .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_REQUIRE_DEVICE, requireDevice);
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_DEVICE_CPU_CORES, 0.5);

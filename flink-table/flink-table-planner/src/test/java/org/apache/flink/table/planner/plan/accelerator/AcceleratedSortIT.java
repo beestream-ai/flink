@@ -66,6 +66,7 @@ class AcceleratedSortIT {
                         + "'fields.val.kind' = 'sequence',"
                         + "'fields.val.start' = '1', 'fields.val.end' = '200')");
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         // A sort's input arrives over a blocking exchange, which is exactly where M4.3's
         // cardinality gate applies: a subtask that cannot fill one batch is refused, because
         // setting a device up costs the same whether the batch is full or holds eleven rows. At

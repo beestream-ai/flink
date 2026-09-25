@@ -64,6 +64,7 @@ class GpuNullRefusalIT {
                 "CREATE TABLE declared (a DOUBLE NOT NULL, b DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '10')");
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
     }
 
     private String offloadSection(String sql) {

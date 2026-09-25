@@ -74,6 +74,7 @@ class AcceleratedOverAggregateIT {
                         + ROWS
                         + "')");
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         // Well under the row count, so the running total has to cross a boundary several times.
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE, 16);
     }

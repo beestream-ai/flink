@@ -52,6 +52,7 @@ class GpuAggregateFusionIT {
                 "CREATE TABLE t (id BIGINT NOT NULL, k INT NOT NULL, val DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '2000000')");
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
     }
 
     private String section(String sql) {

@@ -87,6 +87,7 @@ class AcceleratorCardinalityIT {
                         + "'fields.val.kind' = 'sequence',"
                         + "'fields.val.start' = '1', 'fields.val.end' = '50')");
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         return tEnv;
     }
 

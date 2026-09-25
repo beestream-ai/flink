@@ -189,6 +189,8 @@ class DifferentialExpressionIT {
         }
 
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         TestAcceleratorProvider.enable(10.0);
         if (corrupt) {
             TestAcceleratorProvider.corruptArithmetic();

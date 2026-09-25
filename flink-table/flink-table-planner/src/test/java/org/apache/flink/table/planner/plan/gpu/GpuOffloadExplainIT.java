@@ -61,6 +61,7 @@ class GpuOffloadExplainIT {
     @DisplayName("a filter on a computed column joins the projection in one offloaded subtree")
     void filterOnAComputedColumnFusesIntoTheCalc() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         String plan =
                 tEnv.explainSql(
                         "SELECT h FROM ("
@@ -87,6 +88,7 @@ class GpuOffloadExplainIT {
     @DisplayName("show the rendered section")
     void showOutput() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         for (String sql : new String[] {CHEAP, HEAVY}) {
             String plan = tEnv.explainSql(sql);
             System.out.println("---------- " + sql);
@@ -98,6 +100,7 @@ class GpuOffloadExplainIT {
     @DisplayName("a cheap query reports its work, and says where the decision is made")
     void rejectionIsExplained() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         String plan = tEnv.explainSql(CHEAP);
 
         assertTrue(plan.contains("== GPU Offload =="), plan);
@@ -111,6 +114,7 @@ class GpuOffloadExplainIT {
     @DisplayName("a selected node reports GPU even where the client has no device")
     void selectionIsReportedIndependentlyOfTheClient() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         String plan = tEnv.explainSql(HEAVY);
 
         assertTrue(plan.contains("== GPU Offload =="), plan);
@@ -129,6 +133,7 @@ class GpuOffloadExplainIT {
     @DisplayName("an inexpressible type is reported as such, not as merely too cheap")
     void inexpressibleIsExplained() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         tEnv.executeSql(
                 "CREATE TABLE s (word STRING, n INT) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '10')");
@@ -141,6 +146,7 @@ class GpuOffloadExplainIT {
     @DisplayName("a nullable column is eligible too, and costs a byte more to carry")
     void nullableColumnIsEligibleAndCostsMore() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
+        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         // Same heavy expression, same shape, same row count -- the only difference is the DDL.
         tEnv.executeSql(
                 "CREATE TABLE nullable_t (id BIGINT, val DOUBLE) WITH ("
