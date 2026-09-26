@@ -1322,15 +1322,37 @@ public class ExecutionConfigOptions {
      * 5% win is not worth those.
      */
     @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
+    /**
+     * The margin a provider must claim before its plan is taken.
+     *
+     * <p>Lenient on purpose, and provisionally. Choosing well between a CPU operator and a device
+     * one is a research question this project has not answered: the estimate a provider makes is
+     * its own, for its own hardware, about a query it has not run, and no measurement here
+     * establishes what margin is the right price for being wrong. Until one does, the default
+     * prefers the device wherever a provider expects it to be no slower, so the cost of a bad
+     * guess is a query that could have been faster rather than an accelerator that never runs.
+     *
+     * <p>The risk it accepts is bounded and the risk it avoids is not. Offloading something the
+     * CPU would have done marginally quicker costs that margin. Declining everything makes the
+     * whole feature invisible, which is what a 1.3 default did to queries the device would have
+     * drawn or won.
+     *
+     * <p>This governs <em>cost</em> only. Nothing here can make a subtree eligible that the
+     * provenance analysis refused, or that the provider declined for a type it cannot hold: those
+     * refusals are about the answer, not about the price, and no configuration relaxes them.
+     */
     public static final ConfigOption<Double> TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP =
             ConfigOptions.key("table.exec.accelerator.min-speedup")
                     .doubleType()
-                    .defaultValue(1.3)
+                    .defaultValue(1.0)
                     .withDescription(
                             "How much faster than the CPU a provider must claim to be before its "
                                     + "plan is preferred. Compared against the provider's own "
                                     + "estimate for its own device, made on the TaskManager. Not "
-                                    + "a hardware constant: it means the same on any accelerator.");
+                                    + "a hardware constant: it means the same on any accelerator. "
+                                    + "The default of 1.0 offloads whenever a provider expects to "
+                                    + "be no slower than the CPU; it was 1.3, which declined work "
+                                    + "the device would have won or drawn.");
 
     /**
      * The largest subtask parallelism at which a node may still be offloaded.
