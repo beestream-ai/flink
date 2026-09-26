@@ -151,4 +151,42 @@ class DriftReachColumnIT {
                 .withFailMessage("a sort key that drifts changes the order of the answer:\n" + plan)
                 .contains(REFUSED);
     }
+
+    @Test
+    @DisplayName("an ORDER BY on a column that does not drift is offered")
+    void sortingOnACleanKeyIsOffered() {
+        // The counterpart of the test above, and the reason this distinction is worth drawing: a
+        // sort reorders rows, it does not invent or remove them, so which rows come back is
+        // unchanged unless the ORDER BY itself reads a drifting column. Refusing every downstream
+        // sort would refuse every query that sorts its own output -- which is most of them.
+        String plan =
+                explain(
+                        "SELECT k, s FROM (SELECT k, SUM("
+                                + DRIFTS
+                                + ") AS s FROM t GROUP BY k) ORDER BY k");
+
+        assertThat(plan)
+                .withFailMessage("k is a scan column; nothing rounds it:\n" + plan)
+                .doesNotContain(REFUSED);
+        assertThat(plan).contains("== GPU Offload ==").contains("GPU  subtree 0");
+    }
+
+    @Test
+    @DisplayName("a LIMIT the optimiser pushed below the projection does not refuse it")
+    void aLimitBelowTheProjectionIsHarmless() {
+        // Worth pinning because the obvious reading is the opposite. A LIMIT over a drifting value
+        // would decide which rows come back -- but Calcite does not leave it there: a projection
+        // does not change row count, so the limit sinks below it and the plan becomes
+        // Calc <- Limit <- Scan. By the time the drifting value exists the rows are already
+        // chosen, and the analysis is right to accept.
+        //
+        // The dangerous shape is ORDER BY over a drifting column, which cannot be pushed down and
+        // is refused -- see driftReachingASortIsRefused.
+        String plan = explain("SELECT d FROM (SELECT " + DRIFTS + " AS d FROM t) LIMIT 5");
+
+        assertThat(plan).contains("Limit");
+        assertThat(plan)
+                .withFailMessage("the limit runs before the projection, so nothing drifts:\n" + plan)
+                .doesNotContain(REFUSED);
+    }
 }

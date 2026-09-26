@@ -300,6 +300,23 @@ public final class NumericalProvenance {
             }
             return drifting;
         }
+        if (isOrdering(consumer)) {
+            final int[] sortKeys = sortKeysOf(consumer);
+            if (sortKeys == null) {
+                // It orders by something, and this cannot read by what. Unknown means unsafe.
+                return null;
+            }
+            // A sort reorders rows; it does not invent or remove them. Which rows come back is
+            // therefore unchanged unless the ORDER BY reads a drifting column -- and then it is
+            // changed twice over, because a LIMIT above it keeps a different set. So the keys
+            // decide, and the row shape is untouched either way.
+            for (int key : sortKeys) {
+                if (drifting.contains(key)) {
+                    return null;
+                }
+            }
+            return drifting;
+        }
         if (consumer instanceof GpuOffloadExecNode) {
             final Set<Integer> mapped = ((GpuOffloadExecNode) consumer).forwardDrift(drifting);
             if (mapped != null) {
@@ -307,6 +324,50 @@ public final class NumericalProvenance {
             }
         }
         return throughAggregate(consumer, drifting);
+    }
+
+    /** Whether this node decides the order of rows, and so whether a drifting key would matter. */
+    private static boolean isOrdering(ExecNode<?> consumer) {
+        final String kind = consumer.getClass().getSimpleName();
+        return kind.endsWith("Sort") || kind.endsWith("SortLimit") || kind.endsWith("Rank");
+    }
+
+    /**
+     * The columns this node orders by, or null when they cannot be read.
+     *
+     * <p>Read off the node's {@code sortSpec} reflectively, in the same spirit as the grouping
+     * keys: naming {@code BatchExecSort} and {@code BatchExecSortLimit} here would tie this
+     * analysis to a list a new node type silently falls off, and unreadable has to mean "assume it
+     * decides rows" rather than "assume it is safe".
+     *
+     * <p>Null is returned when the spec is absent or unreadable, and the caller refuses on it. A
+     * plain {@code Limit} has no {@code sortSpec} and lands here: it keeps the first rows of
+     * whatever order it was given, so a drifting value upstream can change which ones survive.
+     */
+    @Nullable
+    private static int[] sortKeysOf(ExecNode<?> consumer) {
+        for (Class<?> type = consumer.getClass(); type != null; type = type.getSuperclass()) {
+            try {
+                final java.lang.reflect.Field field = type.getDeclaredField("sortSpec");
+                field.setAccessible(true);
+                final Object spec = field.get(consumer);
+                if (spec == null) {
+                    return null;
+                }
+                final java.lang.reflect.Method keys =
+                        spec.getClass().getMethod("getFieldIndices");
+                keys.setAccessible(true);
+                final Object indices = keys.invoke(spec);
+                return indices instanceof int[] ? (int[]) indices : null;
+            } catch (NoSuchFieldException keepLooking) {
+                continue;
+            } catch (ReflectiveOperationException | RuntimeException notVisible) {
+                return null;
+            }
+        }
+        // Orders by something with no readable sortSpec -- a plain LIMIT, or a node type added
+        // since. Null refuses, which is the direction an unknown has to fail in.
+        return null;
     }
 
     private static boolean isExchange(ExecNode<?> consumer) {
