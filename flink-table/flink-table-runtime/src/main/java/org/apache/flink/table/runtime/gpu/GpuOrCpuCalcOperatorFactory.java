@@ -32,6 +32,8 @@ import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeServiceAware;
 import org.apache.flink.table.accelerator.AcceleratorDeclineReason;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.accelerator.AccelInput;
+import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
 import org.apache.flink.table.runtime.accelerator.AcceleratorChoice;
 import org.apache.flink.table.runtime.accelerator.AcceleratorProvider;
@@ -257,7 +259,38 @@ public class GpuOrCpuCalcOperatorFactory extends AbstractStreamOperatorFactory<R
      * sizes the arena with.
      */
     public int bytesPerRow() {
-        return bytesPerRowOf(spec);
+        return arrivingBytesPerRow(spec);
+    }
+
+    /**
+     * The width of the row this operator <em>receives</em>, which is what a byte count produced
+     * upstream should be divided by.
+     *
+     * <p>M8.3. This used to report {@link #bytesPerRowOf}, input plus output, which is the figure
+     * the staging arena is sized with and the wrong one here. For a fused Calc and aggregate the
+     * profile's "input" is the aggregate's input -- the projection's output, one value per
+     * expression -- not the row the upstream produced. On a Gram matrix that is 496 doubles a row
+     * against an arriving row of 31, so the gate divided by thirty times too much and refused a
+     * million rows as thirty thousand.
+     *
+     * <p>The arriving row is the subtree's leaf, which is the one node whose type is by definition
+     * what the operator is handed. Falls back to the old figure if no leaf is found, which cannot
+     * happen for a well-formed subtree and is not worth throwing over.
+     */
+    private static int arrivingBytesPerRow(AcceleratedCalcSpec spec) {
+        AccelNode node = spec.subtree();
+        while (node != null && !(node instanceof AccelInput)) {
+            node = node.inputs().isEmpty() ? null : node.inputs().get(0);
+        }
+        if (node == null) {
+            return bytesPerRowOf(spec);
+        }
+        // Eight bytes a field, which is what a fixed-width row costs in Flink's binary layout and
+        // what the numeric types this operator stages are worth. Checked against the measurement
+        // that found this bug: 273,000,026 bytes over 1,000,000 rows of 32 fields is 273 a row,
+        // against 256 here -- the difference is the row header, and the gate is an order-of-
+        // magnitude test rather than an accounting.
+        return Math.max(1, 8 * node.outputType().getFieldCount());
     }
 
     private static int bytesPerRowOf(AcceleratedCalcSpec spec) {
