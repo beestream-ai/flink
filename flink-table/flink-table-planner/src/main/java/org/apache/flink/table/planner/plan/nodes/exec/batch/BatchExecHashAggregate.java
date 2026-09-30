@@ -393,15 +393,29 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         }
         final org.apache.flink.table.planner.plan.nodes.exec.ExecNode<?> input =
                 inputEdge.getSource();
-        final java.util.Optional<org.apache.flink.table.accelerator.AccelScan> scan =
-                input.deviceScan();
-        if (!scan.isPresent()) {
+        // A scan directly beneath, or a projection that reaches one. The second is what admits a
+        // query with arithmetic between the file and the aggregate, which is every query whose
+        // aggregate is worth moving to a device at all.
+        final java.util.Optional<org.apache.flink.table.accelerator.AccelNode> region =
+                input.deviceScan().isPresent()
+                        ? java.util.Optional.of(input.deviceScan().get())
+                        : input.deviceProjection();
+        if (!region.isPresent()) {
+            return java.util.Optional.empty();
+        }
+        // A projection in the region computes values, and a device rounds them differently. That
+        // is the same give-up the Calc offload is gated on, so it is gated the same way here --
+        // otherwise moving the arithmetic into the source would be a way to obtain approximate
+        // results under a configuration that refuses them.
+        if (region.get() instanceof org.apache.flink.table.accelerator.AccelProject
+                && !config.get(
+                        ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS)) {
             return java.util.Optional.empty();
         }
         final RowType inputType = (RowType) inputEdge.getOutputType();
         final java.util.Optional<org.apache.flink.table.accelerator.AccelNode> subtree =
                 org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder.buildAggregateOverScan(
-                        grouping, java.util.Arrays.asList(aggCalls), scan.get(), inputType,
+                        grouping, java.util.Arrays.asList(aggCalls), region.get(), inputType,
                         (RowType) getOutputType());
         if (!subtree.isPresent()) {
             return java.util.Optional.empty();
@@ -414,9 +428,9 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
             return java.util.Optional.empty();
         }
         LOG.info(
-                "Accelerator reads the source and aggregates it: {} keys from {}",
+                "Accelerator reads the source and aggregates it: {} keys, region rooted at {}",
                 grouping.length,
-                scan.get().format());
+                region.get().getClass().getSimpleName());
         return java.util.Optional.of(
                 planner.getExecEnv()
                         .fromSource(

@@ -226,9 +226,47 @@ public class BatchExecTableSourceScan extends CommonExecTableSourceScan
         }
         final String format = rawFormat.toLowerCase(java.util.Locale.ROOT);
         final RowType produced = (RowType) getOutputType();
+        // The file's column indexes, not the produced row's. Projection pushdown has usually
+        // already run by now, so the produced row is a subset -- and reading it as though field i
+        // of the row were column i of the file is a wrong answer of the worst kind: the columns
+        // exist, the types line up, and the number that comes back is a real sum of the wrong
+        // data. SELECT lat, lon over (id, lat, lon) would read id and lat.
         final int[] projected = new int[produced.getFieldCount()];
-        for (int i = 0; i < projected.length; i++) {
-            projected[i] = i;
+        org.apache.flink.table.planner.plan.abilities.source.ProjectPushDownSpec pushDown = null;
+        final java.util.List<
+                        org.apache.flink.table.planner.plan.abilities.source.SourceAbilitySpec>
+                abilities = getTableSourceSpec().getSourceAbilities();
+        if (abilities != null) {
+            for (org.apache.flink.table.planner.plan.abilities.source.SourceAbilitySpec ability :
+                    abilities) {
+                if (ability
+                        instanceof
+                        org.apache.flink.table.planner.plan.abilities.source
+                                .ProjectPushDownSpec) {
+                    pushDown =
+                            (org.apache.flink.table.planner.plan.abilities.source
+                                            .ProjectPushDownSpec)
+                                    ability;
+                }
+            }
+        }
+        if (pushDown == null) {
+            for (int i = 0; i < projected.length; i++) {
+                projected[i] = i;
+            }
+        } else {
+            final int[][] fields = pushDown.getProjectedFields();
+            if (fields.length != projected.length) {
+                return java.util.Optional.empty();
+            }
+            for (int i = 0; i < fields.length; i++) {
+                // A nested reference -- a field inside a ROW -- has no column index a columnar
+                // reader can be handed. Declining is correct; there is no index to pass.
+                if (fields[i].length != 1) {
+                    return java.util.Optional.empty();
+                }
+                projected[i] = fields[i][0];
+            }
         }
         return java.util.Optional.of(
                 new org.apache.flink.table.accelerator.AccelScan(

@@ -41,6 +41,7 @@ import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
 import org.apache.flink.table.planner.plan.gpu.NumericalProvenance;
 import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
+import org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeContext;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeMetadata;
@@ -138,6 +139,32 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
     @Override
     public boolean supportGpuOffload() {
         return true;
+    }
+
+    /**
+     * This projection rooted at the scan beneath it, when there is one.
+     *
+     * <p>The seam that lets an aggregate above keep the whole region on the device. Without it the
+     * aggregate asks its input for a scan, a Calc is not a scan, and a query with any arithmetic
+     * between the file and the aggregate falls back to the CPU read — which is every query worth
+     * offloading, because a query with no arithmetic has nothing to offload.
+     *
+     * <p>Not cached. It is asked once per aggregate while planning, and the expressions it walks
+     * are the ones already walked by {@link #estimateRowCost()}.
+     */
+    @Override
+    public Optional<AccelNode> deviceProjection() {
+        final ExecNode<?> input = getInputEdges().get(0).getSource();
+        if (!(input instanceof GpuOffloadExecNode)) {
+            return Optional.empty();
+        }
+        final Optional<org.apache.flink.table.accelerator.AccelScan> scan =
+                ((GpuOffloadExecNode) input).deviceScan();
+        if (!scan.isPresent()) {
+            return Optional.empty();
+        }
+        return AccelIrBuilder.buildProjectOver(
+                projection, condition, scan.get(), (RowType) getOutputType());
     }
 
     /**

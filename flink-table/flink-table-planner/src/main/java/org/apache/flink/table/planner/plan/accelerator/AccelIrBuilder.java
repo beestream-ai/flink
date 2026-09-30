@@ -316,16 +316,25 @@ public final class AccelIrBuilder {
      * key. Those are refusals of shape, not of cost, so they are made here rather than left for a
      * provider to discover.
      *
-     * @param grouping key field indexes into the scan's row
+     * <p>{@code input} is the device-resident subtree the aggregate sits on. Until V10 that was
+     * always the {@link AccelScan} itself; it may now also be an {@link AccelProject} over one, in
+     * which case the summed field indexes the projection's output and not the file's columns.
+     *
+     * <p>An empty {@code grouping} is admitted and means a global sum. Flink only ever asks for
+     * one on the <em>local</em> half of a two-phase aggregate, so the answer a provider returns is
+     * a partial that the {@code Final} aggregate above the substitution combines — one row per
+     * subtask, not one row for the query.
+     *
+     * @param grouping key field indexes into {@code inputType}, possibly empty
      * @param aggCalls the local half's calls, in the order they follow the keys
      */
     public static Optional<AccelNode> buildAggregateOverScan(
             int[] grouping,
             List<AggregateCall> aggCalls,
-            AccelScan scan,
+            AccelNode input,
             RowType inputType,
             RowType outputType) {
-        if (grouping.length != 1 || aggCalls.size() != 1) {
+        if (grouping.length > 1 || aggCalls.size() != 1) {
             return Optional.empty();
         }
         final AggregateCall call = aggCalls.get(0);
@@ -335,24 +344,60 @@ public final class AccelIrBuilder {
         if (!"SUM".equals(call.getAggregation().getName())) {
             return Optional.empty();
         }
-        final int keyField = grouping[0];
         final int valueField = call.getArgList().get(0);
-        if (keyField >= inputType.getFieldCount() || valueField >= inputType.getFieldCount()) {
+        if (valueField >= inputType.getFieldCount()) {
             return Optional.empty();
         }
-        if (!(inputType.getTypeAt(keyField) instanceof IntType)
-                || !(inputType.getTypeAt(valueField) instanceof DoubleType)) {
+        if (!(inputType.getTypeAt(valueField) instanceof DoubleType)) {
             return Optional.empty();
+        }
+        for (int keyField : grouping) {
+            if (keyField >= inputType.getFieldCount()
+                    || !(inputType.getTypeAt(keyField) instanceof IntType)) {
+                return Optional.empty();
+            }
         }
         final AccelAggCall accelCall =
                 new AccelAggCall(
                         AccelAggFunction.SUM, valueField, inputType.getTypeAt(valueField));
         return Optional.of(
                 new AccelAggregate(
-                        new int[] {keyField},
+                        grouping.clone(),
                         java.util.Collections.singletonList(accelCall),
-                        scan,
+                        input,
                         outputType));
+    }
+
+    /**
+     * A projection rooted at the device subtree that feeds it rather than at an anonymous input.
+     *
+     * <p>The mirror of {@link #buildTopNOverScan} for a {@link org.apache.flink.table.planner.plan
+     * .nodes.exec.batch.BatchExecCalc}: {@link #buildCalc} roots the same expressions at an
+     * {@link AccelInput}, meaning "rows arrive, already on the host", which is the right answer
+     * when the Calc is offloaded on its own. Rooted at a scan instead, the projection is something
+     * an operator <em>above</em> it can keep on the device.
+     *
+     * <p>A filter is refused rather than rendered. The generator can write one, but it writes it
+     * as a mask the host then compacts, and nothing here yet consumes a masked device batch — so
+     * admitting one would produce a subtree whose row count is a lie.
+     */
+    public static Optional<AccelNode> buildProjectOver(
+            List<RexNode> projection,
+            @Nullable RexNode condition,
+            AccelNode input,
+            RowType outputType) {
+        if (condition != null) {
+            return Optional.empty();
+        }
+        final List<AccelExpression> projections = new ArrayList<>(projection.size());
+        for (RexNode expression : projection) {
+            final Optional<AccelExpression> converted = convert(expression);
+            if (!converted.isPresent()) {
+                return Optional.empty();
+            }
+            projections.add(converted.get());
+        }
+        return Optional.of(new AccelProject(projections, input, outputType));
     }
 
     /**

@@ -117,6 +117,25 @@ public interface GpuOffloadExecNode {
     }
 
     /**
+     * The device subtree this node contributes on top of a scan beneath it, or empty.
+     *
+     * <p>Where {@link #deviceScan()} asks "are you a readable source", this asks "are you work
+     * that could stay on the device with the source that feeds you". A projection answers it: the
+     * expressions it evaluates become a kernel between the read and whatever consumes the result,
+     * so an operator above can offer the whole region to a provider as one subtree.
+     *
+     * <p>Returning a subtree is not a decision to offload it. The node still translates to its
+     * ordinary CPU operator unless something above substitutes the region, and a provider that
+     * declines leaves the plan exactly as it was.
+     *
+     * <p>Empty by default, including for a node that is device-capable in isolation but whose own
+     * input is not a scan — the subtree has to reach the file to be worth anything.
+     */
+    default java.util.Optional<org.apache.flink.table.accelerator.AccelNode> deviceProjection() {
+        return java.util.Optional.empty();
+    }
+
+    /**
      * Whether this node can take a device-resident batch as its input, rather than rows.
      *
      * <p>The difference between a device scan that pays for itself and one that pays for a read

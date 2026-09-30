@@ -126,7 +126,27 @@ public final class AccelIrVersion {
      */
     public static final int V9 = 9;
 
-    public static final int CURRENT = V9;
+    /**
+     * Admits a projection between an {@link AccelAggregate} and an {@link AccelScan}, and an
+     * aggregate with no grouping key at all.
+     *
+     * <p>Both halves are new and a V9 provider mishandles each differently. It has seen
+     * {@code Aggregate(Scan)}, where every column the aggregate names is read straight out of the
+     * file; it has never seen {@code Aggregate(Project(Scan))}, where the summed column does not
+     * exist until a kernel computes it. A provider that walked past the projection to the scan
+     * beneath would sum a column of the file instead of the expression over it -- a plausible
+     * number, of the right type, from the wrong column.
+     *
+     * <p>The empty grouping is the sharper half. Every {@code AccelAggregate} before this had at
+     * least one key, so a provider may reasonably emit one row per distinct key and never consider
+     * what an empty key list means. Handed one, it either emits nothing or emits per-batch
+     * partials that nothing downstream knows to combine. Flink puts a {@code Final} aggregate
+     * above the substituted {@code Local} one, so partials <em>are</em> the contract here -- but
+     * that is a contract a V9 provider was never told about.
+     */
+    public static final int V10 = 10;
+
+    public static final int CURRENT = V10;
 
     private AccelIrVersion() {}
 }
