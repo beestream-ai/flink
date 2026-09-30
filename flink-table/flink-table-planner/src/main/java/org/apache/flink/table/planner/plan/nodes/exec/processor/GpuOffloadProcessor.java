@@ -23,6 +23,7 @@ import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
 import org.apache.flink.table.planner.plan.gpu.NumericalProvenance;
+import org.apache.flink.table.planner.plan.gpu.DeviceScanPlacement;
 import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
@@ -101,8 +102,6 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
         Map<ExecNode<?>, Integer> groupOf = new IdentityHashMap<>();
         Map<Integer, List<ExecNode<?>>> groups = new LinkedHashMap<>();
         int nextGroupId = 0;
-
-        offerScans(order, decision);
 
         // Producers are visited before consumers, so a node's inputs already have a group when it
         // is considered and can be absorbed into the node's own.
@@ -191,6 +190,11 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
                 assign(member, new GpuOffloadAssignment(entry.getKey(), verdict));
             }
         }
+
+        // After the groups, because what reads a scan is the only thing that decides whether
+        // reading it on a device is worth anything, and that is not known until the operators
+        // above it have their verdicts.
+        offerScans(order, consumers, decision);
 
         return fuse(execGraph, groupOf, config);
     }
@@ -497,7 +501,10 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
      * left without an assignment, exactly as before, so EXPLAIN says nothing about it and no plan
      * moves.
      */
-    private void offerScans(List<ExecNode<?>> order, GpuOffloadDecision decision) {
+    private void offerScans(
+            List<ExecNode<?>> order,
+            Map<ExecNode<?>, List<ExecNode<?>>> consumers,
+            GpuOffloadDecision decision) {
         for (ExecNode<?> node : order) {
             final java.util.Optional<org.apache.flink.table.accelerator.AccelScan> scan =
                     node.deviceScan();
@@ -505,16 +512,34 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
                 continue;
             }
             final RowCost cost =
-                    RowCost.ineligible(
-                            "a "
-                                    + scan.get().format()
-                                    + " file source was offered to the accelerator; every consumer"
-                                    + " of it reads rows on the host, so reading it on the device"
-                                    + " would only add a copy back");
+                    DeviceScanPlacement.decide(scan.get().format(), consumerKind(node, consumers));
             assign(
                     node,
                     new GpuOffloadAssignment(
                             NO_GROUP, decision.forSubtree(Collections.singletonList(cost))));
         }
+    }
+
+    /**
+     * What reads this scan, in the only three kinds that change the answer.
+     *
+     * <p>A scan with several consumers takes the best of them: if any consumer can use the batch
+     * as it is, the read pays for itself there and the others are served by a transition they
+     * would have paid for anyway.
+     */
+    private static DeviceScanPlacement.Consumer consumerKind(
+            ExecNode<?> scan, Map<ExecNode<?>, List<ExecNode<?>>> consumers) {
+        DeviceScanPlacement.Consumer best = DeviceScanPlacement.Consumer.NONE_OFFLOADED;
+        for (ExecNode<?> consumer : consumers.getOrDefault(scan, Collections.emptyList())) {
+            final GpuOffloadAssignment assignment = consumer.getGpuOffloadAssignment();
+            if (assignment == null || !assignment.isOffloaded()) {
+                continue;
+            }
+            if (consumer.consumesDeviceInput()) {
+                return DeviceScanPlacement.Consumer.OFFLOADED_READS_DEVICE;
+            }
+            best = DeviceScanPlacement.Consumer.OFFLOADED_READS_ROWS;
+        }
+        return best;
     }
 }

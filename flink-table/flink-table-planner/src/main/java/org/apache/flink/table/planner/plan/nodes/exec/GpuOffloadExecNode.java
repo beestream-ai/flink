@@ -117,6 +117,17 @@ public interface GpuOffloadExecNode {
     }
 
     /**
+     * Whether this node can take a device-resident batch as its input, rather than rows.
+     *
+     * <p>The difference between a device scan that pays for itself and one that pays for a read
+     * and a copy back and gains nothing. False for every operator until one can, which is why
+     * every scan is declined today and declined <em>by the rule</em> rather than by a constant.
+     */
+    default boolean consumesDeviceInput() {
+        return false;
+    }
+
+    /**
      * Which of this node's output columns may drift, by index.
      *
      * <p>Lets the provenance analysis ask about a column rather than a node, which matters for one

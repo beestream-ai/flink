@@ -78,8 +78,11 @@ class AcceleratedScanIT {
                 .as("the reason must name the format and why it was still declined:\n" + plan)
                 .contains("a testcsv file source was offered");
         assertThat(plan)
-                .as("and must name the reason, not merely refuse:\n" + plan)
-                .contains("every consumer of it reads");
+                .as("and must name why, not merely refuse:\n" + plan)
+                .contains("copy back");
+        assertThat(plan)
+                .as("the refusal is priced, not a constant:\n" + plan)
+                .contains("ns a field");
     }
 
     /** The scan is reported for its own sake; the operator above it decides separately. */
