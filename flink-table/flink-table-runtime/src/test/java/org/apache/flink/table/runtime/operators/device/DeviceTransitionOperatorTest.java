@@ -396,4 +396,129 @@ class DeviceTransitionOperatorTest {
         }
         return c;
     }
+
+    /**
+     * M9.10. A batch exists on the device from the moment toDevice returns until collect hands it
+     * on. A failure in that window would strand the allocation, and a device allocation that
+     * outlives its job is not reclaimed by anything short of the process ending.
+     */
+    @Test
+    void aBatchThatCannotBeHandedOnIsReleased() throws Exception {
+        HostBackedTransfer transfer = new HostBackedTransfer();
+        RowToDeviceOperator operator =
+                new RowToDeviceOperator(transfer, ROW, 1, DeviceTransitionOperatorTest::copy);
+
+        try (OneInputStreamOperatorTestHarness<RowData, DeviceBatch> harness =
+                new OneInputStreamOperatorTestHarness<>(operator) {
+                    @Override
+                    public void processElement(
+                            org.apache.flink.streaming.runtime.streamrecord.StreamRecord<RowData>
+                                    element)
+                            throws Exception {
+                        super.processElement(element);
+                    }
+                }) {
+            harness.setup(new ExplodingOnCollect());
+            harness.open();
+            try {
+                harness.processElement(row(1, 1.0), 0);
+            } catch (Exception | Error expected) {
+                // the point is what happened to the allocation
+            }
+        }
+
+        assertThat(transfer.released)
+                .as("both columns of the stranded batch released")
+                .isEqualTo(2);
+    }
+
+    /** A serializer that fails the hand-off, standing in for a downstream operator that throws. */
+    private static final class ExplodingOnCollect
+            extends org.apache.flink.api.common.typeutils.TypeSerializer<DeviceBatch> {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public boolean isImmutableType() {
+            return false;
+        }
+
+        @Override
+        public org.apache.flink.api.common.typeutils.TypeSerializer<DeviceBatch> duplicate() {
+            return this;
+        }
+
+        @Override
+        public DeviceBatch createInstance() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public DeviceBatch copy(DeviceBatch from) {
+            throw new IllegalStateException("downstream refused the batch");
+        }
+
+        @Override
+        public DeviceBatch copy(DeviceBatch from, DeviceBatch reuse) {
+            throw new IllegalStateException("downstream refused the batch");
+        }
+
+        @Override
+        public int getLength() {
+            return -1;
+        }
+
+        @Override
+        public void serialize(
+                DeviceBatch record, org.apache.flink.core.memory.DataOutputView target) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public DeviceBatch deserialize(org.apache.flink.core.memory.DataInputView source) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public DeviceBatch deserialize(
+                DeviceBatch reuse, org.apache.flink.core.memory.DataInputView source) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void copy(
+                org.apache.flink.core.memory.DataInputView source,
+                org.apache.flink.core.memory.DataOutputView target) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof ExplodingOnCollect;
+        }
+
+        @Override
+        public int hashCode() {
+            return ExplodingOnCollect.class.hashCode();
+        }
+
+        @Override
+        public org.apache.flink.api.common.typeutils.TypeSerializerSnapshot<DeviceBatch>
+                snapshotConfiguration() {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    /** Closing with nothing in flight releases nothing and throws nothing. */
+    @Test
+    void closingACleanOperatorIsQuiet() throws Exception {
+        HostBackedTransfer transfer = new HostBackedTransfer();
+        RowToDeviceOperator operator =
+                new RowToDeviceOperator(transfer, ROW, 8, DeviceTransitionOperatorTest::copy);
+        try (OneInputStreamOperatorTestHarness<RowData, DeviceBatch> harness =
+                new OneInputStreamOperatorTestHarness<>(operator)) {
+            harness.setup(new DeviceBatchSerializer());
+            harness.open();
+        }
+        assertThat(transfer.released).isZero();
+    }
 }

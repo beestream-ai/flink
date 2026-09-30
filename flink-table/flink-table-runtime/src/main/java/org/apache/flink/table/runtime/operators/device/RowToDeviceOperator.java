@@ -55,6 +55,7 @@ public class RowToDeviceOperator extends AbstractStreamOperator<DeviceBatch>
     private final RowDataCopier copier;
 
     private transient List<RowData> pending;
+    private transient DeviceBatch inFlight;
     private transient StreamRecord<DeviceBatch> outRecord;
     private transient Counter rowsIn;
     private transient Counter batchesIn;
@@ -111,7 +112,46 @@ public class RowToDeviceOperator extends AbstractStreamOperator<DeviceBatch>
         nanos.inc(System.nanoTime() - start);
         batchesIn.inc();
         pending = new ArrayList<>(batchSize);
-        outRecord.replace(batch);
-        output.collect(outRecord);
+
+        // Held until the downstream operator has it. Ownership passes on collect(), so between
+        // allocating and collecting this field is the only reference to the allocation, and a
+        // failure in that window would otherwise strand it.
+        inFlight = batch;
+        try {
+            outRecord.replace(batch);
+            output.collect(outRecord);
+        } catch (RuntimeException | Error handedOff) {
+            batch.close();
+            throw handedOff;
+        } finally {
+            inFlight = null;
+        }
+    }
+
+    /**
+     * Releases a batch that was allocated but never handed on.
+     *
+     * <p>Cancellation and failure both arrive here, and the window they arrive in is real: a batch
+     * exists on the device from the moment {@code toDevice} returns until {@code collect} hands it
+     * to the next operator. A device allocation that outlives its job is not reclaimed by anything
+     * short of the process ending, so this is not a tidiness measure.
+     *
+     * <p>Idempotent, because close may follow a failure that already released it — which is the
+     * same reason {@code DeviceBatch.close()} is.
+     */
+    @Override
+    public void close() throws Exception {
+        try {
+            if (inFlight != null) {
+                inFlight.close();
+                inFlight = null;
+            }
+        } finally {
+            // Staged host rows are ordinary objects; dropping the reference is all they need, and
+            // they are dropped rather than emitted because a batch emitted from close() would
+            // arrive after the consumer had finished.
+            pending = null;
+            super.close();
+        }
     }
 }
