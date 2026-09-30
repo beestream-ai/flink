@@ -70,6 +70,7 @@ public class DeviceToRowOperator extends AbstractStreamOperator<RowData>
         final DeviceBatch batch = element.getValue();
         final long start = System.nanoTime();
         try {
+            refuseMaskedColumnsUnlessUnderstood(batch);
             transfer.toHost(
                     batch,
                     row -> {
@@ -83,6 +84,32 @@ public class DeviceToRowOperator extends AbstractStreamOperator<RowData>
             batch.close();
             nanos.inc(System.nanoTime() - start);
             batchesOut.inc();
+        }
+    }
+
+    /**
+     * A masked column handed to a transfer that does not understand masks is a wrong answer, not a
+     * slow one: the null positions come back as whatever the padding held, and a row count or a
+     * checksum of the right length agrees with it. So it is refused here, naming the column.
+     *
+     * <p>Refusing rather than widening is the same stance the rest of this work takes on nulls —
+     * the planner tells a query author that {@code NOT NULL} in DDL is the fix, and nothing here
+     * widens that exception.
+     */
+    private void refuseMaskedColumnsUnlessUnderstood(DeviceBatch batch) {
+        if (transfer.supportsNulls()) {
+            return;
+        }
+        for (int i = 0; i < batch.columns().size(); i++) {
+            if (batch.column(i).mayContainNulls()) {
+                throw new IllegalStateException(
+                        "column "
+                                + i
+                                + " of this batch carries a validity mask, and the accelerator's"
+                                + " transfer does not read masks. Reading it as dense would return"
+                                + " the padding wherever a value is null. Declare the column NOT"
+                                + " NULL, or use a provider that serves nullable columns.");
+            }
         }
     }
 }

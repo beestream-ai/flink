@@ -64,6 +64,21 @@ public interface DeviceBatchTransfer {
     DeviceBatch toDevice(List<RowData> rows, RowType rowType);
 
     /**
+     * Whether this transfer understands validity masks.
+     *
+     * <p>Default false, which matches the operand contract every provider here states: dense and
+     * non-null. It is asked rather than assumed because the failure it prevents is silent — a
+     * masked column read as dense returns whatever the padding happened to be, in the positions
+     * that were null, and no row count or checksum of the right length catches it.
+     *
+     * <p>A transfer that returns false is never handed a masked batch; the transition refuses it
+     * instead, and the refusal names the column.
+     */
+    default boolean supportsNulls() {
+        return false;
+    }
+
+    /**
      * Whether this transfer can serve {@code rowType} at all.
      *
      * <p>Asked before a plan commits to a transition, so an unsupported type is a decline rather

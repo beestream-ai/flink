@@ -273,4 +273,127 @@ class DeviceTransitionOperatorTest {
             assertThat(expected).hasMessageContaining("batchSize");
         }
     }
+
+    /**
+     * M9.11. A masked column read as dense returns the padding wherever a value was null, and a
+     * row count of the right length agrees with it. So it is refused, and the refusal names the
+     * column and the fix.
+     */
+    @Test
+    void aMaskedColumnIsRefusedByATransferThatDoesNotReadMasks() throws Exception {
+        HostBackedTransfer transfer = new HostBackedTransfer();
+        DeviceBuffer values = transfer.new Region(8);
+        DeviceBuffer validity = transfer.new Region(1);
+        DeviceBatch masked =
+                new DeviceBatch(
+                        RowType.of(new DoubleType(true)),
+                        Arrays.asList(
+                                new DeviceColumn(new DoubleType(true), values, validity)),
+                        1);
+
+        assertThat(transfer.supportsNulls()).as("the default contract is dense").isFalse();
+
+        DeviceToRowOperator operator = new DeviceToRowOperator(transfer);
+        Throwable caught = null;
+        try (OneInputStreamOperatorTestHarness<DeviceBatch, RowData> harness =
+                new OneInputStreamOperatorTestHarness<>(operator)) {
+            harness.setup();
+            harness.open();
+            try {
+                harness.processElement(masked, 0);
+            } catch (Exception e) {
+                caught = e;
+            }
+        }
+
+        assertThat(caught).isNotNull();
+        assertThat(rootCause(caught))
+                .hasMessageContaining("validity mask")
+                .hasMessageContaining("NOT NULL");
+        assertThat(masked.isClosed()).as("refusing still releases the memory").isTrue();
+    }
+
+    /** A transfer that does understand masks is handed the batch unchanged. */
+    @Test
+    void aTransferThatReadsMasksIsNotRefused() throws Exception {
+        HostBackedTransfer backing = new HostBackedTransfer();
+        DeviceBuffer values = backing.new Region(8);
+        DeviceBuffer validity = backing.new Region(1);
+        DeviceBatch masked =
+                new DeviceBatch(
+                        RowType.of(new DoubleType(true)),
+                        Arrays.asList(
+                                new DeviceColumn(new DoubleType(true), values, validity)),
+                        1);
+
+        List<String> seen = new ArrayList<>();
+        DeviceBatchTransfer maskAware =
+                new DeviceBatchTransfer() {
+                    @Override
+                    public boolean supportsNulls() {
+                        return true;
+                    }
+
+                    @Override
+                    public void toHost(DeviceBatch b, Consumer<RowData> out) {
+                        seen.add("copied " + b.rowCount());
+                    }
+
+                    @Override
+                    public DeviceBatch toDevice(List<RowData> rows, RowType rowType) {
+                        throw new UnsupportedOperationException();
+                    }
+
+                    @Override
+                    public boolean supports(RowType rowType) {
+                        return true;
+                    }
+                };
+
+        DeviceToRowOperator operator = new DeviceToRowOperator(maskAware);
+        try (OneInputStreamOperatorTestHarness<DeviceBatch, RowData> harness =
+                new OneInputStreamOperatorTestHarness<>(operator)) {
+            harness.setup();
+            harness.open();
+            harness.processElement(masked, 0);
+        }
+
+        assertThat(seen).containsExactly("copied 1");
+    }
+
+    /** An unmasked batch is unaffected, so nothing already working slows down or changes. */
+    @Test
+    void anUnmaskedBatchIsNotCheckedAgainstAnything() throws Exception {
+        HostBackedTransfer transfer = new HostBackedTransfer();
+        DeviceBatch dense = transfer.toDevice(Arrays.asList(row(1, 1.0)), ROW);
+        List<String> seen = new ArrayList<>();
+
+        DeviceToRowOperator operator = new DeviceToRowOperator(transfer);
+        try (OneInputStreamOperatorTestHarness<DeviceBatch, RowData> harness =
+                new OneInputStreamOperatorTestHarness<>(operator)) {
+            harness.setup();
+            harness.open();
+            harness.processElement(dense, 0);
+            harness.getOutput()
+                    .forEach(
+                            o ->
+                                    seen.add(
+                                            String.valueOf(
+                                                    ((org.apache.flink.streaming.runtime
+                                                                            .streamrecord
+                                                                            .StreamRecord<RowData>)
+                                                                    o)
+                                                            .getValue()
+                                                            .getInt(0))));
+        }
+        assertThat(seen).containsExactly("1");
+    }
+
+    private static Throwable rootCause(Throwable t) {
+        Throwable c = t;
+        while (c.getCause() != null) {
+            c = c.getCause();
+        }
+        return c;
+    }
 }
