@@ -81,6 +81,9 @@ import java.util.Map;
  */
 public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
 
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(GpuOffloadProcessor.class);
+
     /** Group id for a node that was examined but could not join any subtree. */
     public static final int NO_GROUP = -1;
 
@@ -513,10 +516,20 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
             }
             final RowCost cost =
                     DeviceScanPlacement.decide(scan.get().format(), consumerKind(node, consumers));
-            assign(
-                    node,
-                    new GpuOffloadAssignment(
-                            NO_GROUP, decision.forSubtree(Collections.singletonList(cost))));
+            final GpuOffloadDecision.Verdict verdict =
+                    decision.forSubtree(Collections.singletonList(cost));
+            // One line a cluster operator can find without turning EXPLAIN on. A declined scan is
+            // the normal case, not a fault, so it is INFO and it says why rather than that it
+            // happened.
+            if (verdict.offload()) {
+                LOG.info("Accelerator will read the source: {}", node.getDescription());
+            } else {
+                LOG.info(
+                        "Source read on the CPU: {} — {}",
+                        node.getDescription(),
+                        verdict.reason());
+            }
+            assign(node, new GpuOffloadAssignment(NO_GROUP, verdict));
         }
     }
 

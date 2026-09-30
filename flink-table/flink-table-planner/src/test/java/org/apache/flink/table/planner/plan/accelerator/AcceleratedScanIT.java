@@ -26,6 +26,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.apache.flink.types.Row;
+import org.apache.flink.util.CloseableIterator;
 
 import java.nio.file.Path;
 
@@ -145,5 +147,55 @@ class AcceleratedScanIT {
         int start = plan.indexOf("== Optimized Physical Plan ==");
         int end = plan.indexOf("== Optimized Execution Plan ==");
         return start < 0 || end < 0 ? plan : plan.substring(start, end);
+    }
+
+    /**
+     * M9.13. The fallback is the default, not an error path: with nothing to offload the query
+     * returns exactly what it returns with the feature off.
+     */
+    @Test
+    @DisplayName("a declined source falls back to Flink's own reader and returns the same rows")
+    void aDeclinedSourceReturnsTheSameRows() throws Exception {
+        java.nio.file.Files.write(
+                data.resolve("part-0.csv"),
+                java.util.Arrays.asList("1,1.5", "2,2.5", "3,3.5"));
+
+        fileSystemTable("parq", "testcsv");
+        java.util.List<String> withAccelerator = collect(tEnv, "SELECT k, v FROM parq ORDER BY k");
+
+        TableEnvironment off =
+                TableEnvironment.create(EnvironmentSettings.newInstance().inBatchMode().build());
+        off.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, false);
+        off.executeSql(
+                "CREATE TABLE parq (k INT NOT NULL, v DOUBLE NOT NULL) WITH ("
+                        + "'connector' = 'filesystem','path' = '"
+                        + data.toUri()
+                        + "','format' = 'testcsv')");
+        java.util.List<String> withoutAccelerator = collect(off, "SELECT k, v FROM parq ORDER BY k");
+
+        assertThat(withAccelerator).isEqualTo(withoutAccelerator);
+        assertThat(withAccelerator).containsExactly("1,1.5", "2,2.5", "3,3.5");
+    }
+
+    /** The reason travels with the decline, so a fallback is never silent. */
+    @Test
+    @DisplayName("the fallback names its reason")
+    void theFallbackNamesItsReason() {
+        fileSystemTable("parq", "testcsv");
+        String plan = tEnv.explainSql("SELECT k, v FROM parq");
+        assertThat(plan).contains("was offered to the accelerator");
+        assertThat(plan).contains("copy back");
+    }
+
+    private static java.util.List<String> collect(TableEnvironment env, String sql)
+            throws Exception {
+        java.util.List<String> rows = new java.util.ArrayList<>();
+        try (CloseableIterator<Row> it = env.executeSql(sql).collect()) {
+            while (it.hasNext()) {
+                Row r = it.next();
+                rows.add(r.getField(0) + "," + r.getField(1));
+            }
+        }
+        return rows;
     }
 }
