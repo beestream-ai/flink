@@ -35,17 +35,32 @@ class DeviceScanPlacementTest {
     }
 
     /**
-     * The case that matters today: the operator above is on the device but reads rows, so the
-     * device read buys a copy back and nothing else.
+     * Was a refusal until the device decode rate was measured. 3.17 + 11.3 against 17.3 is a
+     * 1.19x margin — thin, and eaten by the row building rather than the read, which is the
+     * argument for residency rather than against reading on the device.
      */
     @Test
-    void aScanFeedingAnOffloadedOperatorThatReadsRowsIsRefusedWithTheArithmetic() {
+    void aScanFeedingAnOffloadedOperatorWouldNowPayButHasNowhereToRun() {
+        assertThat(DeviceScanPlacement.hostConsumerPaysOff())
+                .as("3.17 device decode + 11.3 row building beats 17.3 CPU decode")
+                .isTrue();
         RowCost cost =
                 DeviceScanPlacement.decide(
                         "parquet", DeviceScanPlacement.Consumer.OFFLOADED_READS_ROWS);
-        assertThat(cost.isEligible()).isFalse();
-        assertThat(cost.toString()).contains("copy back");
-        assertThat(cost.toString()).contains("6.0 ns a field");
+        assertThat(cost.isEligible())
+                .as("still declined, but on the missing implementation, not the cost")
+                .isFalse();
+        assertThat(cost.toString()).contains("no device source is wired into a plan yet");
+        assertThat(cost.toString()).contains("3.17 ns a field");
+    }
+
+    /** The measured rate is what decides it, so it is pinned against its source. */
+    @Test
+    void theDeviceDecodeRateIsTheMeasuredOne() {
+        assertThat(DeviceScanPlacement.DEVICE_DECODE_NANOS_PER_FIELD).isEqualTo(3.17);
+        assertThat(DeviceScanPlacement.DEVICE_DECODE_NANOS_PER_FIELD)
+                .as("it clears the break-even this class was written not knowing")
+                .isLessThan(DeviceScanPlacement.breakEvenNanosPerField());
     }
 
     @Test
@@ -75,5 +90,8 @@ class DeviceScanPlacementTest {
     void residencyBuysTheStagingAsWellAsTheDecode() {
         assertThat(DeviceScanPlacement.budgetWhenResidentNanosPerField())
                 .isGreaterThan(5 * DeviceScanPlacement.breakEvenNanosPerField());
+        assertThat(DeviceScanPlacement.residentSpeedup())
+                .as("3.17 against 34.3 a field")
+                .isGreaterThan(10.0);
     }
 }

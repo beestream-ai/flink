@@ -81,9 +81,9 @@ class AcceleratedScanIT {
                 .contains("a testcsv file source was offered");
         assertThat(plan)
                 .as("and must name why, not merely refuse:\n" + plan)
-                .contains("copy back");
+                .contains("no device source is wired into a plan yet");
         assertThat(plan)
-                .as("the refusal is priced, not a constant:\n" + plan)
+                .as("the refusal is priced against a measured rate, not a constant:\n" + plan)
                 .contains("ns a field");
     }
 
@@ -183,8 +183,10 @@ class AcceleratedScanIT {
     void theFallbackNamesItsReason() {
         fileSystemTable("parq", "testcsv");
         String plan = tEnv.explainSql("SELECT k, v FROM parq");
+        // No projection above it, so nothing is offloaded and the reason is the structural one
+        // rather than the priced one.
         assertThat(plan).contains("was offered to the accelerator");
-        assertThat(plan).contains("copy back");
+        assertThat(plan).contains("nothing above it");
     }
 
     private static java.util.List<String> collect(TableEnvironment env, String sql)

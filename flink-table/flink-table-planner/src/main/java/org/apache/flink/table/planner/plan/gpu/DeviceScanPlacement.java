@@ -62,6 +62,14 @@ public final class DeviceScanPlacement {
     /** Measured: the 4,594 ms arrival path over 8M x 32 fields. */
     static final double STAGING_NANOS_PER_FIELD = 17.0;
 
+    /**
+     * Measured: 101.3 ms for a resident cuDF read of 1M rows x 32 fields, §T27.
+     *
+     * <p>The figure this class was first written without. Its absence was the reason a scan
+     * feeding a host consumer was declined, and its value is the reason that is no longer right.
+     */
+    static final double DEVICE_DECODE_NANOS_PER_FIELD = 3.17;
+
     /** What reads the scan, which is the only thing that decides this. */
     public enum Consumer {
         /** Nothing above it was offloaded. */
@@ -89,19 +97,23 @@ public final class DeviceScanPlacement {
                                 + " runs on the device, so a device read would be followed"
                                 + " immediately by a copy back to the host");
             case OFFLOADED_READS_ROWS:
+                // The economics now favour the read -- 3.17 + 11.3 against 17.3, a 1.19x margin --
+                // but no device source is wired into a Flink plan yet, so saying "offloaded" here
+                // would make EXPLAIN claim something that does not happen. Declined on the
+                // implementation, and the reason says so rather than blaming the cost, because the
+                // cost is no longer the obstacle.
                 return RowCost.ineligible(
                         "a "
                                 + format
-                                + " file source was offered to the accelerator; its consumer runs"
-                                + " on the device but reads rows on the host, so the copy back"
-                                + " alone costs "
-                                + COPY_BACK_NANOS_PER_FIELD
-                                + " of the "
+                                + " file source was offered to the accelerator; a device read is"
+                                + " measured at "
+                                + DEVICE_DECODE_NANOS_PER_FIELD
+                                + " ns a field against "
                                 + CPU_DECODE_NANOS_PER_FIELD
-                                + " ns a field the CPU decode costs, and the device would have to"
-                                + " decode in under "
-                                + String.format("%.1f", breakEvenNanosPerField())
-                                + " ns a field to repay it — which nothing here has measured");
+                                + " on the CPU, so this would pay by about "
+                                + String.format("%.2f", hostConsumerSpeedup())
+                                + "x even after building rows again on the host — but no device"
+                                + " source is wired into a plan yet");
             case OFFLOADED_READS_DEVICE:
             default:
                 return RowCost.ZERO;
@@ -114,6 +126,22 @@ public final class DeviceScanPlacement {
      */
     public static double breakEvenNanosPerField() {
         return CPU_DECODE_NANOS_PER_FIELD - COPY_BACK_NANOS_PER_FIELD;
+    }
+
+    /** Whether a device read repays itself even when its consumer wants rows on the host. */
+    public static boolean hostConsumerPaysOff() {
+        return hostConsumerSpeedup() > 1.0;
+    }
+
+    /** By how much, for the same case. Thin, and eaten by the row building rather than the read. */
+    public static double hostConsumerSpeedup() {
+        return CPU_DECODE_NANOS_PER_FIELD
+                / (DEVICE_DECODE_NANOS_PER_FIELD + COPY_BACK_NANOS_PER_FIELD);
+    }
+
+    /** The margin when the consumer takes the batch as it is: no row building, no staging. */
+    public static double residentSpeedup() {
+        return budgetWhenResidentNanosPerField() / DEVICE_DECODE_NANOS_PER_FIELD;
     }
 
     /**
