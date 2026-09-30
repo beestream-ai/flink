@@ -274,6 +274,38 @@ public final class AccelIrBuilder {
     }
 
     /**
+     * The IR for a top-N: the same ordering, keeping only the first {@code limit} rows.
+     *
+     * <p>One node rather than a sort with a limit above it, for the reason {@link AccelSort}
+     * records: a bounded sort is the only kind whose output is smaller than its input, and
+     * splitting it would oblige a provider to return the whole ordering so that something else
+     * could throw nearly all of it away.
+     *
+     * <p>Empty when the range does not start at the first row. {@code limitStart} is an offset into
+     * the ordering, and an offset is not expressible here: a provider is asked for the first
+     * {@code N} of a permutation, not a window of it, and the node has nowhere to put the
+     * difference.
+     *
+     * @param limitStart first row of the ordering to emit, which must be 0
+     * @param limitEnd one past the last row of the ordering to emit
+     */
+    public static Optional<AccelNode> buildTopN(
+            SortSpec sortSpec, long limitStart, long limitEnd, RowType inputType) {
+        if (sortSpec.getFieldSize() != 1 || limitStart != 0L || limitEnd <= 0L) {
+            return Optional.empty();
+        }
+        SortSpec.SortFieldSpec field = sortSpec.getFieldSpec(0);
+        return Optional.of(
+                new AccelSort(
+                        field.getFieldIndex(),
+                        field.getIsAscendingOrder(),
+                        field.getNullIsLast(),
+                        limitEnd,
+                        new AccelInput(inputType),
+                        inputType));
+    }
+
+    /**
      * Builds the IR for an inner equi-join, or empty where the shape is not describable.
      *
      * <p>Takes its inputs in build/probe order, which is the order the transformation puts them in

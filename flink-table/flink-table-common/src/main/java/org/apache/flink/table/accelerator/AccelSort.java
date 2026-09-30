@@ -49,27 +49,65 @@ import java.util.List;
  * before it can emit anything. Flink's own sort spills past its memory budget, and a provider is
  * expected to <em>decline</em> past its own rather than spill — falling back to the operator Flink
  * generated, which knows how.
+ *
+ * <h2>Why the limit is here and not a node above</h2>
+ *
+ * <p>A top-N is one device operation, not two: order the key column, then read the first {@code N}
+ * of the permutation. Expressing it as a sort with a {@code Limit} node above would oblige a
+ * provider to hand back the whole ordered input so that something else could discard nearly all of
+ * it — which is the one thing a sort must not do, because its output is as large as its input and
+ * the copy back is what makes a device sort unprofitable.
+ *
+ * <p>The limit also changes what a provider may accept. An unbounded sort returns as many rows as
+ * it read; a bounded one returns {@code N} however much it read, so the size a provider refuses on
+ * above is the <em>input</em> size, while the cost of returning the answer is fixed. Those are
+ * different enough that a provider will reasonably take one and decline the other.
  */
 @PublicEvolving
 public final class AccelSort extends AccelNode {
 
     private static final long serialVersionUID = 1L;
 
+    /** What {@link #limit()} reports when every ordered row is wanted. */
+    public static final long NO_LIMIT = Long.MAX_VALUE;
+
     private final int sortField;
     private final boolean ascending;
     private final boolean nullsLast;
+    private final long limit;
     private final AccelNode input;
     private final RowType outputType;
 
+    /** An unbounded sort: every row the input holds, ordered. */
     public AccelSort(
             int sortField,
             boolean ascending,
             boolean nullsLast,
             AccelNode input,
             RowType outputType) {
+        this(sortField, ascending, nullsLast, NO_LIMIT, input, outputType);
+    }
+
+    /**
+     * A sort that keeps only the first {@code limit} rows of the ordering.
+     *
+     * @param limit how many ordered rows to emit, or {@link #NO_LIMIT} for all of them
+     */
+    public AccelSort(
+            int sortField,
+            boolean ascending,
+            boolean nullsLast,
+            long limit,
+            AccelNode input,
+            RowType outputType) {
+        if (limit <= 0) {
+            throw new IllegalArgumentException(
+                    "a sort limit is a row count and must be positive, not " + limit);
+        }
         this.sortField = sortField;
         this.ascending = ascending;
         this.nullsLast = nullsLast;
+        this.limit = limit;
         this.input = input;
         this.outputType = outputType;
     }
@@ -93,6 +131,21 @@ public final class AccelSort extends AccelNode {
         return nullsLast;
     }
 
+    /**
+     * How many ordered rows to emit, or {@link #NO_LIMIT}.
+     *
+     * <p>Always positive. A provider that ignores it produces a correct ordering and the wrong
+     * number of rows, so it is not safe to leave unread.
+     */
+    public long limit() {
+        return limit;
+    }
+
+    /** Whether this sort emits fewer rows than it read. */
+    public boolean isBounded() {
+        return limit != NO_LIMIT;
+    }
+
     @Override
     public List<AccelNode> inputs() {
         return Collections.singletonList(input);
@@ -112,6 +165,7 @@ public final class AccelSort extends AccelNode {
                 + (ascending ? "ASC" : "DESC")
                 + " NULLS "
                 + (nullsLast ? "LAST" : "FIRST")
+                + (isBounded() ? " LIMIT " + limit : "")
                 + ")";
     }
 }

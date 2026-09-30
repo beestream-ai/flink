@@ -98,7 +98,19 @@ public final class AccelIrVersion {
      */
     public static final int V7 = 7;
 
-    public static final int CURRENT = V7;
+    /**
+     * Adds a limit to {@link AccelSort}, so a top-N is one node rather than a sort under a limit.
+     *
+     * <p>Bumped rather than added quietly, and this one is not mild. A V7 provider reads
+     * {@code AccelSort} as "order every row and give them all back"; a V8 planner may hand it a
+     * node meaning "order every row and give back the first thousand". The two differ in the row
+     * count of the answer, not in whether a rendering exists — so a provider that met the new node
+     * unprepared would return a correct ordering of the wrong number of rows, and nothing
+     * downstream would notice.
+     */
+    public static final int V8 = 8;
+
+    public static final int CURRENT = V8;
 
     private AccelIrVersion() {}
 }

@@ -37,6 +37,15 @@ import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.runtime.generated.GeneratedRecordComparator;
 import org.apache.flink.table.runtime.operators.sort.SortLimitOperator;
+import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
+import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
+import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
+import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
+import org.apache.flink.table.planner.plan.gpu.GpuSortSupport;
+import org.apache.flink.table.planner.plan.gpu.RowCost;
+import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
+import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -44,6 +53,7 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCre
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.Collections;
+import java.util.Optional;
 import java.util.List;
 
 import static org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecLimit.FIELD_NAME_IS_GLOBAL;
@@ -149,9 +159,66 @@ public class BatchExecSortLimit extends ExecNodeBase<RowData>
         return ExecNodeUtil.createOneInputTransformation(
                 inputTransform,
                 createTransformationMeta(SORT_LIMIT_TRANSFORMATION, config),
-                SimpleOperatorFactory.of(operator),
+                substitute(config, inputType, SimpleOperatorFactory.of(operator)),
                 InternalTypeInfo.of(inputType),
                 inputTransform.getParallelism(),
                 false);
+    }
+
+    /**
+     * Offers the top-N to an accelerator, or returns Flink's own heap operator unchanged.
+     *
+     * <p>The same seam {@link BatchExecSort} has, and it matters more here. An unbounded sort hands
+     * back as many rows as it read, so the copy off the device is the size of the input and usually
+     * eats the ordering it just paid for. A top-N hands back {@code limitEnd} rows however many it
+     * read — the one ordering shape whose answer is small — which is why this node is worth
+     * offering at all and the plain sort so often is not.
+     *
+     * <p>Offered for both the local and the global instance. They differ in what they are ordering,
+     * not in what is asked of a provider: order one key, keep the first {@code N}. The local one is
+     * where the rows are, so it is the one a device can save time on; the global one sees at most
+     * {@code N} per subtask and will usually be refused on size, by the provider, for its own
+     * reasons.
+     */
+    private StreamOperatorFactory<RowData> substitute(
+            ExecNodeConfig config, RowType inputType, StreamOperatorFactory<RowData> onCpu) {
+        GpuOffloadAssignment assignment = getGpuOffloadAssignment();
+        if (assignment == null || !assignment.isOffloaded() || config.isCompiled()) {
+            // M4.4: a compiled plan does not offload, and a top-N is no exception.
+            return onCpu;
+        }
+        Optional<AccelNode> subtree =
+                AccelIrBuilder.buildTopN(sortSpec, limitStart, limitEnd, inputType);
+        if (!subtree.isPresent()) {
+            return onCpu;
+        }
+        AcceleratedCalcSpec spec =
+                new AcceleratedCalcSpec(
+                        subtree.get(),
+                        assignment.verdict().work(),
+                        (RowType) getOutputType(),
+                        config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE),
+                        config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
+        return new GpuOrCpuCalcOperatorFactory(spec, onCpu);
+    }
+
+    /**
+     * Offloadable in principle when the range starts at the first row.
+     *
+     * <p>A non-zero {@code limitStart} is an offset into the ordering, which {@link AccelSort}
+     * cannot carry: a provider is asked for the first {@code N} of a permutation, not a window of
+     * it. Refusing here rather than in the IR builder keeps the reason in the plan.
+     */
+    @Override
+    public boolean supportGpuOffload() {
+        return limitStart == 0L;
+    }
+
+    @Override
+    public RowCost estimateRowCost() {
+        RowType inputType = (RowType) getInputEdges().get(0).getOutputType();
+        double rows = getEstimatedRowCount();
+        long estimated = rows <= 0 ? 0L : (long) rows;
+        return GpuSortSupport.estimate(sortSpec, inputType, estimated);
     }
 }

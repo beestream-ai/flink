@@ -105,7 +105,7 @@ class BatchPhysicalSortLimit(
       InputProperty.UNKNOWN_DISTRIBUTION
     }
 
-    new BatchExecSortLimit(
+    val execNode = new BatchExecSortLimit(
       unwrapTableConfig(this),
       SortUtil.getSortSpec(sortCollation.getFieldCollations),
       limitStart,
@@ -118,5 +118,11 @@ class BatchPhysicalSortLimit(
         .build(),
       FlinkTypeFactory.toLogicalRowType(getRowType),
       getRelDetailedDescription)
+    // As BatchPhysicalSort does, and for the same reason: a top-N still orders the whole input,
+    // so the cardinality that decides whether a device can hold it is the cardinality of the
+    // *input*, not of the N rows it emits. Taken from the input rather than from this node, which
+    // reports the limited count and would say a thousand rows fit anywhere.
+    execNode.setEstimatedRowCount(getCluster.getMetadataQuery.getRowCount(getInput))
+    execNode
   }
 }
