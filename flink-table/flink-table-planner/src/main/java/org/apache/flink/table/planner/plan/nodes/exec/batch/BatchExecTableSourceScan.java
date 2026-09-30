@@ -179,4 +179,62 @@ public class BatchExecTableSourceScan extends CommonExecTableSourceScan
         tableSourceScan.setInputEdges(Collections.emptyList());
         return tableSourceScan;
     }
+
+    /**
+     * The scan this node is, when a device reader could plausibly open it.
+     *
+     * <p>Answered from the table's own options rather than from the source object, because the
+     * question is about the bytes on disk and not about the reader Flink happens to have built for
+     * them. A connector that is not {@code filesystem} has no path a device reader could take and
+     * is not offered.
+     *
+     * <p>The format is passed through rather than checked against a list. Which formats a device
+     * can decode is the provider's knowledge, not Flink's, and an allowlist here would be a second
+     * place to keep it in step — {@link org.apache.flink.table.accelerator.AccelScan} exists so
+     * that a provider declines on the string.
+     *
+     * <p>Note what this does <em>not</em> do: it does not make the scan offloadable.
+     * {@link #supportGpuOffload()} stays false, so the scan does not join the grouping that
+     * decides which operators share a device, and every plan is the plan it was before. This
+     * answers "could a provider read this", so the answer can be recorded and reported; acting on
+     * it needs an operator that can consume a device-resident batch.
+     */
+    @Override
+    public java.util.Optional<org.apache.flink.table.accelerator.AccelScan> deviceScan() {
+        final java.util.Map<String, String> options;
+        try {
+            options =
+                    getTableSourceSpec()
+                            .getContextResolvedTable()
+                            .getResolvedTable()
+                            .getOptions();
+        } catch (RuntimeException notResolvable) {
+            // An inline or otherwise unresolved table. Unknown means "no scan to offer", which is
+            // the direction this has to fail in.
+            return java.util.Optional.empty();
+        }
+        if (options == null) {
+            return java.util.Optional.empty();
+        }
+        if (!"filesystem".equals(options.get("connector"))) {
+            return java.util.Optional.empty();
+        }
+        final String path = options.get("path");
+        final String rawFormat = options.get("format");
+        if (rawFormat == null || path == null) {
+            return java.util.Optional.empty();
+        }
+        final String format = rawFormat.toLowerCase(java.util.Locale.ROOT);
+        final RowType produced = (RowType) getOutputType();
+        final int[] projected = new int[produced.getFieldCount()];
+        for (int i = 0; i < projected.length; i++) {
+            projected[i] = i;
+        }
+        return java.util.Optional.of(
+                new org.apache.flink.table.accelerator.AccelScan(
+                        format,
+                        java.util.Collections.singletonList(path),
+                        projected,
+                        produced));
+    }
 }

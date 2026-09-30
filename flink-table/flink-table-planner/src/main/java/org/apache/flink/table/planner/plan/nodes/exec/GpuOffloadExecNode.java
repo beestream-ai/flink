@@ -98,6 +98,25 @@ public interface GpuOffloadExecNode {
     }
 
     /**
+     * The scan this node is, as IR a provider can be asked about — or empty when it is not a scan
+     * a device could read.
+     *
+     * <p>Separate from {@link #supportGpuOffload()} on purpose, and the separation is the point.
+     * That flag puts a node into the grouping that decides which operators run together on a
+     * device; a source is not an operator in that sense, and until something can consume a
+     * device-resident batch, grouping a scan with the operator above it would change plans for a
+     * capability that does not exist yet. This method asks the narrower question — <em>could a
+     * provider read this itself</em> — so the answer can be recorded and reported before anything
+     * acts on it.
+     *
+     * <p>Empty by default. Every node that is not a source returns empty, and so does a source
+     * whose format or connector a device reader has no way to open.
+     */
+    default java.util.Optional<org.apache.flink.table.accelerator.AccelScan> deviceScan() {
+        return java.util.Optional.empty();
+    }
+
+    /**
      * Which of this node's output columns may drift, by index.
      *
      * <p>Lets the provenance analysis ask about a column rather than a node, which matters for one

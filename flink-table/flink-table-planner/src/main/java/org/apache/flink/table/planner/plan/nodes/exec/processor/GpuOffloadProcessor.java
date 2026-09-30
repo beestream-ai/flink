@@ -102,6 +102,8 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
         Map<Integer, List<ExecNode<?>>> groups = new LinkedHashMap<>();
         int nextGroupId = 0;
 
+        offerScans(order, decision);
+
         // Producers are visited before consumers, so a node's inputs already have a group when it
         // is considered and can be absorbed into the node's own.
         for (ExecNode<?> node : order) {
@@ -477,5 +479,42 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
             }
         }
         return counts;
+    }
+
+    /**
+     * Records, for every source that could be read by a device, what came back when it was asked.
+     *
+     * <p>Separate from the operator pass and deliberately without a group. A scan that joined the
+     * grouping would be placed on a device alongside the operator above it, and the operator above
+     * it reads {@code RowData} — so the rows would come off the device one at a time, which is the
+     * cost the whole exercise exists to remove, paid to no purpose. Until an operator can consume
+     * a device-resident batch, the honest verdict for every scan is a decline, and what this pass
+     * buys is that the decline is <em>visible</em>: EXPLAIN was previously silent about sources
+     * altogether, so a reader could not tell an unsupported format from a supported one nothing
+     * had asked about.
+     *
+     * <p>A source that offers no scan at all — a different connector, an unreadable format — is
+     * left without an assignment, exactly as before, so EXPLAIN says nothing about it and no plan
+     * moves.
+     */
+    private void offerScans(List<ExecNode<?>> order, GpuOffloadDecision decision) {
+        for (ExecNode<?> node : order) {
+            final java.util.Optional<org.apache.flink.table.accelerator.AccelScan> scan =
+                    node.deviceScan();
+            if (!scan.isPresent()) {
+                continue;
+            }
+            final RowCost cost =
+                    RowCost.ineligible(
+                            "a "
+                                    + scan.get().format()
+                                    + " file source was offered to the accelerator; every consumer"
+                                    + " of it reads rows on the host, so reading it on the device"
+                                    + " would only add a copy back");
+            assign(
+                    node,
+                    new GpuOffloadAssignment(
+                            NO_GROUP, decision.forSubtree(Collections.singletonList(cost))));
+        }
     }
 }
