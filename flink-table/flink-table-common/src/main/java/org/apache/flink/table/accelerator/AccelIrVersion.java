@@ -110,7 +110,23 @@ public final class AccelIrVersion {
      */
     public static final int V8 = 8;
 
-    public static final int CURRENT = V8;
+    /**
+     * Adds {@link AccelScan}, a leaf that reads from storage instead of receiving rows.
+     *
+     * <p>The bump is for a leaf a V8 provider has never been shown. Every subtree it has been
+     * offered is rooted at {@link AccelInput}, whose meaning is "rows arrive, already on the
+     * host"; a V9 planner may root one at a scan, whose meaning is "read this file yourself".
+     * A provider that walked to the leaf and assumed it was an input would read a format string
+     * and a list of paths as though rows were waiting behind them, and there is no shape check
+     * that would catch it — both are leaves producing a row type.
+     *
+     * <p>Mild in one respect and not in another. A provider that declines the subtree is correct
+     * and loses nothing, because declining a scan plans the CPU source Flink would have planned
+     * anyway. A provider that accepts one it did not understand returns rows from nowhere.
+     */
+    public static final int V9 = 9;
+
+    public static final int CURRENT = V9;
 
     private AccelIrVersion() {}
 }
