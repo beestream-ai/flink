@@ -50,6 +50,8 @@ import org.apache.flink.table.planner.plan.nodes.exec.spec.OverSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.DoubleType;
+import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.RowType;
 
 import org.apache.calcite.rel.core.AggregateCall;
@@ -304,6 +306,53 @@ public final class AccelIrBuilder {
                         limitEnd,
                         new AccelInput(inputType),
                         inputType));
+    }
+
+    /**
+     * A local aggregate rooted at the scan that feeds it: a two-operator device region.
+     *
+     * <p>Refuses anything the cuDF binding cannot serve directly — more than one grouping key,
+     * anything but {@code SUM}, a distinct or filtered call, a non-FP64 argument or a non-INT32
+     * key. Those are refusals of shape, not of cost, so they are made here rather than left for a
+     * provider to discover.
+     *
+     * @param grouping key field indexes into the scan's row
+     * @param aggCalls the local half's calls, in the order they follow the keys
+     */
+    public static Optional<AccelNode> buildAggregateOverScan(
+            int[] grouping,
+            List<AggregateCall> aggCalls,
+            AccelScan scan,
+            RowType inputType,
+            RowType outputType) {
+        if (grouping.length != 1 || aggCalls.size() != 1) {
+            return Optional.empty();
+        }
+        final AggregateCall call = aggCalls.get(0);
+        if (call.isDistinct() || call.hasFilter() || call.getArgList().size() != 1) {
+            return Optional.empty();
+        }
+        if (!"SUM".equals(call.getAggregation().getName())) {
+            return Optional.empty();
+        }
+        final int keyField = grouping[0];
+        final int valueField = call.getArgList().get(0);
+        if (keyField >= inputType.getFieldCount() || valueField >= inputType.getFieldCount()) {
+            return Optional.empty();
+        }
+        if (!(inputType.getTypeAt(keyField) instanceof IntType)
+                || !(inputType.getTypeAt(valueField) instanceof DoubleType)) {
+            return Optional.empty();
+        }
+        final AccelAggCall accelCall =
+                new AccelAggCall(
+                        AccelAggFunction.SUM, valueField, inputType.getTypeAt(valueField));
+        return Optional.of(
+                new AccelAggregate(
+                        new int[] {keyField},
+                        java.util.Collections.singletonList(accelCall),
+                        scan,
+                        outputType));
     }
 
     /**

@@ -75,6 +75,9 @@ import java.util.List;
 public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         implements BatchExecNode<RowData>, SingleTransformationTranslator<RowData> {
 
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(BatchExecHashAggregate.class);
+
     public static final String HASH_AGGREGATE_TRANSFORMATION = "hash-aggregate";
     public static final String FIELD_NAME_GROUPING = "grouping";
     public static final String FIELD_NAME_AUX_GROUPING = "auxGrouping";
@@ -165,6 +168,18 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
     protected Transformation<RowData> translateToPlanInternal(
             PlannerBase planner, ExecNodeConfig config) {
         final ExecEdge inputEdge = getInputEdges().get(0);
+
+        // A local aggregate sitting directly on a file source a provider will read is a
+        // two-operator device region: the scan and the aggregate run in one execution plan and the
+        // columns never come to the host. The provider's source replaces both, so the CPU reader
+        // is never built. The global half above the exchange still merges the partials, which is
+        // why substituting only the local half is safe.
+        final java.util.Optional<Transformation<RowData>> deviceRegion =
+                tryDeviceRegion(planner, config, inputEdge);
+        if (deviceRegion.isPresent()) {
+            return deviceRegion.get();
+        }
+
         final Transformation<RowData> inputTransform =
                 (Transformation<RowData>) inputEdge.translateToPlan(planner);
 
@@ -358,5 +373,58 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
                                                 .getBytes()));
         input.addOutput(1, hashAggSpecGenerator);
         return hashAggSpecGenerator;
+    }
+
+    /**
+     * The provider's source for a local aggregate directly over a readable scan, or empty.
+     *
+     * <p>Narrow, and declining is always free: the path below builds exactly the plan it built
+     * before. Anything between the aggregate and the scan — a projection, a filter — declines,
+     * because the IR would then describe less than the plan does. Lifting that restriction means
+     * generating the projection's kernel inside the source, which is a larger change than this.
+     */
+    private java.util.Optional<Transformation<RowData>> tryDeviceRegion(
+            PlannerBase planner, ExecNodeConfig config, ExecEdge inputEdge) {
+        if (config.isCompiled() || isMerge) {
+            return java.util.Optional.empty();
+        }
+        if (!config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED)) {
+            return java.util.Optional.empty();
+        }
+        final org.apache.flink.table.planner.plan.nodes.exec.ExecNode<?> input =
+                inputEdge.getSource();
+        final java.util.Optional<org.apache.flink.table.accelerator.AccelScan> scan =
+                input.deviceScan();
+        if (!scan.isPresent()) {
+            return java.util.Optional.empty();
+        }
+        final RowType inputType = (RowType) inputEdge.getOutputType();
+        final java.util.Optional<org.apache.flink.table.accelerator.AccelNode> subtree =
+                org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder.buildAggregateOverScan(
+                        grouping, java.util.Arrays.asList(aggCalls), scan.get(), inputType,
+                        (RowType) getOutputType());
+        if (!subtree.isPresent()) {
+            return java.util.Optional.empty();
+        }
+        final java.util.Optional<org.apache.flink.api.connector.source.Source<RowData, ?, ?>>
+                source =
+                        org.apache.flink.table.runtime.accelerator.AcceleratorProviders
+                                .createScanSource(subtree.get(), (RowType) getOutputType());
+        if (!source.isPresent()) {
+            return java.util.Optional.empty();
+        }
+        LOG.info(
+                "Accelerator reads the source and aggregates it: {} keys from {}",
+                grouping.length,
+                scan.get().format());
+        return java.util.Optional.of(
+                planner.getExecEnv()
+                        .fromSource(
+                                source.get(),
+                                org.apache.flink.api.common.eventtime.WatermarkStrategy
+                                        .noWatermarks(),
+                                "AcceleratedScanAggregate",
+                                InternalTypeInfo.of((RowType) getOutputType()))
+                        .getTransformation());
     }
 }
