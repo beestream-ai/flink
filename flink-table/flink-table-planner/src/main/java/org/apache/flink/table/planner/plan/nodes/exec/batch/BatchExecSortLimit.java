@@ -75,6 +75,9 @@ import static org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecSort
 public class BatchExecSortLimit extends ExecNodeBase<RowData>
         implements BatchExecNode<RowData>, SingleTransformationTranslator<RowData> {
 
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(BatchExecSortLimit.class);
+
     public static final String SORT_LIMIT_TRANSFORMATION = "sort-limit";
 
     @JsonProperty(FIELD_NAME_SORT_SPEC)
@@ -139,6 +142,18 @@ public class BatchExecSortLimit extends ExecNodeBase<RowData>
         }
 
         ExecEdge inputEdge = getInputEdges().get(0);
+
+        // Before translating the input: if the whole subtree is a top-N over a file source a
+        // provider can read itself, the provider's source replaces both, and the CPU reader is
+        // never built. Translating the input first would be harmless but pointless -- the
+        // transformation would be unreachable from any sink and dropped -- except that building it
+        // can register state the planner then carries around, so it is skipped entirely.
+        final java.util.Optional<Transformation<RowData>> deviceSource =
+                tryDeviceScanSource(planner, config, inputEdge);
+        if (deviceSource.isPresent()) {
+            return deviceSource.get();
+        }
+
         Transformation<RowData> inputTransform =
                 (Transformation<RowData>) inputEdge.translateToPlan(planner);
 
@@ -220,5 +235,60 @@ public class BatchExecSortLimit extends ExecNodeBase<RowData>
         double rows = getEstimatedRowCount();
         long estimated = rows <= 0 ? 0L : (long) rows;
         return GpuSortSupport.estimate(sortSpec, inputType, estimated);
+    }
+
+    /**
+     * The provider's own source for a top-N directly over a readable file source, or empty.
+     *
+     * <p>Kept narrow on purpose. The pattern is a bounded sort whose only input is a
+     * {@code TableSourceScan} offering an {@link org.apache.flink.table.accelerator.AccelScan};
+     * anything between them -- a projection, a filter, an exchange -- and this declines, because
+     * the IR handed to the provider would then describe less than the plan does and the source
+     * would return rows the query did not ask for.
+     *
+     * <p>Declining is always safe: the normal path below builds exactly the plan it built before.
+     */
+    private java.util.Optional<Transformation<RowData>> tryDeviceScanSource(
+            PlannerBase planner, ExecNodeConfig config, ExecEdge inputEdge) {
+        if (config.isCompiled() || limitStart != 0L) {
+            return java.util.Optional.empty();
+        }
+        if (!config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED)) {
+            return java.util.Optional.empty();
+        }
+        final org.apache.flink.table.planner.plan.nodes.exec.ExecNode<?> input =
+                inputEdge.getSource();
+        final java.util.Optional<org.apache.flink.table.accelerator.AccelScan> scan =
+                input.deviceScan();
+        if (!scan.isPresent()) {
+            return java.util.Optional.empty();
+        }
+        final RowType inputType = (RowType) inputEdge.getOutputType();
+        final java.util.Optional<org.apache.flink.table.accelerator.AccelNode> subtree =
+                AccelIrBuilder.buildTopNOverScan(sortSpec, limitStart, limitEnd, scan.get());
+        if (!subtree.isPresent()) {
+            return java.util.Optional.empty();
+        }
+        final java.util.Optional<org.apache.flink.api.connector.source.Source<RowData, ?, ?>>
+                source =
+                        org.apache.flink.table.runtime.accelerator.AcceleratorProviders
+                                .createScanSource(subtree.get(), inputType);
+        if (!source.isPresent()) {
+            return java.util.Optional.empty();
+        }
+        LOG.info(
+                "Accelerator reads the source: {} rows of {} from {}",
+                limitEnd,
+                inputType.getFieldCount(),
+                scan.get().format());
+        return java.util.Optional.of(
+                planner.getExecEnv()
+                        .fromSource(
+                                source.get(),
+                                org.apache.flink.api.common.eventtime.WatermarkStrategy
+                                        .noWatermarks(),
+                                "AcceleratedScanSort",
+                                InternalTypeInfo.of(inputType))
+                        .getTransformation());
     }
 }

@@ -80,4 +80,43 @@ public final class AcceleratorProviders {
             return Optional.empty();
         }
     }
+
+    /**
+     * The first provider that will read this scan itself, or empty.
+     *
+     * <p>Asked on the JobManager while planning, unlike everything else here, because a source has
+     * to be in the job graph before anything runs. A provider that answers is claiming the
+     * capability for the TaskManagers too; see
+     * {@link AcceleratorProvider#createScanSource}.
+     */
+    public static java.util.Optional<org.apache.flink.api.connector.source.Source<
+                    org.apache.flink.table.data.RowData, ?, ?>>
+            createScanSource(
+                    org.apache.flink.table.accelerator.AccelNode subtree,
+                    org.apache.flink.table.types.logical.RowType outputType) {
+        final Optional<AcceleratorProvider> found =
+                find(AcceleratorProviders.class.getClassLoader());
+        if (found.isPresent()) {
+            final AcceleratorProvider provider = found.get();
+            try {
+                final java.util.Optional<org.apache.flink.api.connector.source.Source<
+                                org.apache.flink.table.data.RowData, ?, ?>>
+                        source = provider.createScanSource(subtree, outputType);
+                if (source.isPresent()) {
+                    return source;
+                }
+            } catch (Throwable declined) {
+                // Throwable, not Exception: on a machine without the hardware an unsatisfied
+                // native link arrives as an Error, and that is the expected outcome, not a fault.
+                // Planning continues on the CPU rather than failing the query, which is what
+                // absence has always meant here.
+                LOG.info(
+                        "Provider {} will not read the source on a device; planning the CPU source"
+                                + " instead: {}",
+                        provider.name(),
+                        declined.toString());
+            }
+        }
+        return java.util.Optional.empty();
+    }
 }

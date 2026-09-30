@@ -33,6 +33,7 @@ import org.apache.flink.table.accelerator.AccelLiteral;
 import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.accelerator.AccelOverAggregate;
 import org.apache.flink.table.accelerator.AccelProject;
+import org.apache.flink.table.accelerator.AccelScan;
 import org.apache.flink.table.accelerator.AccelSort;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.data.DecimalData;
@@ -303,6 +304,33 @@ public final class AccelIrBuilder {
                         limitEnd,
                         new AccelInput(inputType),
                         inputType));
+    }
+
+    /**
+     * The same top-N, but rooted at the scan that feeds it rather than at an anonymous input.
+     *
+     * <p>The difference is the whole of M9: an {@link AccelInput} says "rows arrive, already on the
+     * host", so a provider handed one can at best decorate work that has already been paid for. An
+     * {@link AccelScan} says "here is the file", which is a question a provider can answer by
+     * never bringing the rows to the host at all.
+     *
+     * <p>Refuses the same shapes {@link #buildTopN} refuses, and for the same reasons: one sort
+     * key, no offset, a positive limit.
+     */
+    public static Optional<AccelNode> buildTopNOverScan(
+            SortSpec sortSpec, long limitStart, long limitEnd, AccelScan scan) {
+        if (sortSpec.getFieldSize() != 1 || limitStart != 0L || limitEnd <= 0L) {
+            return Optional.empty();
+        }
+        SortSpec.SortFieldSpec field = sortSpec.getFieldSpec(0);
+        return Optional.of(
+                new AccelSort(
+                        field.getFieldIndex(),
+                        field.getIsAscendingOrder(),
+                        field.getNullIsLast(),
+                        limitEnd,
+                        scan,
+                        scan.outputType()));
     }
 
     /**

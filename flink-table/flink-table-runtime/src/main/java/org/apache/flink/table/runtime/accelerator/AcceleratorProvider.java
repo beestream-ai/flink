@@ -91,4 +91,27 @@ public interface AcceleratorProvider {
      * cast without checking.
      */
     StreamOperatorFactory<RowData> createOperator(AcceleratorPlan plan, AcceleratorContext context);
+
+    /**
+     * A source that reads the subtree's scan itself, when the subtree is rooted at an
+     * {@link org.apache.flink.table.accelerator.AccelScan} and this provider can read it.
+     *
+     * <p>The seam that lets a query author keep writing plain SQL. Everything else in this SPI
+     * decorates a plan Flink already has; this replaces the front of one, because a source that
+     * decodes on the CPU has already paid the cost the device read exists to avoid — ~17.3 ns a
+     * field to decode and another ~17.0 to stage, against ~3.17 to read straight onto the device
+     * (VERIFY.md §T27). There is no way to recover that from downstream.
+     *
+     * <p>Returning a source is a claim about <em>this</em> process. It is asked on the JobManager
+     * while planning and the source is opened on a TaskManager, so a provider that answers here
+     * is promising that the deployment is homogeneous in the capability. Absence is the safe
+     * answer and the default.
+     *
+     * @param subtree the operator tree, rooted at a scan
+     * @param outputType the row the source must produce, which is the subtree's output
+     */
+    default Optional<org.apache.flink.api.connector.source.Source<RowData, ?, ?>> createScanSource(
+            AccelNode subtree, org.apache.flink.table.types.logical.RowType outputType) {
+        return Optional.empty();
+    }
 }
