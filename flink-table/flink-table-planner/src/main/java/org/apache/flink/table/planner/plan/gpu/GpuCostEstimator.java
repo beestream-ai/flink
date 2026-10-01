@@ -231,29 +231,19 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
                             + call.getOperator().getName());
         }
 
-        if (isSingleWidthFloat(call.getType())) {
-            // Flink evaluates FLOAT arithmetic in float and rounds at every step. A kernel that
-            // computes the whole expression in double and narrows once at the end rounds once, and
-            // the two are not the same number.
-            //
-            // They do agree for a single operation, which is why this was easy to miss: double has
-            // 53 bits of mantissa against float's 24, comfortably past the 2p+2 that makes a
-            // double-rounded single operation exact. It is a chain that diverges -- (a+b)+c rounds
-            // twice on the CPU and once on the device -- and a chain is what any expression worth
-            // offloading is.
-            //
-            // Refused rather than fixed. Generating float arithmetic throughout is a real option
-            // and the IR can express it; it is also new vocabulary for the kernel generator, which
-            // this project does not add without a measurement justifying it, and nothing measured
-            // so far says FLOAT expressions matter. The reason names the fix the user can apply.
-            return RowCost.ineligible(
-                    "FLOAT result from "
-                            + call.getOperator().getName()
-                            + ": Flink rounds float arithmetic at every step and a device kernel"
-                            + " would round once, so the two would disagree; compute in DOUBLE to"
-                            + " make this expression offloadable");
-        }
-
+        // A FLOAT result was refused here until 2026-10-01, and the reason is worth keeping.
+        // Flink evaluates FLOAT arithmetic in float and rounds at every step; the generator
+        // computed the whole expression in double and narrowed once at the end, which rounds once.
+        // The two agree for a single operation -- double has 53 bits of mantissa against float's
+        // 24, comfortably past the 2p+2 that makes a double-rounded single operation exact -- and
+        // diverge for a chain, which is what any expression worth offloading is.
+        //
+        // The refusal said it would stand "until the generator can emit float arithmetic
+        // throughout" and that nothing measured said FLOAT expressions mattered. Both have
+        // changed: the generator emits float throughout (M9.17 -- every subexpression typed from
+        // its own declared type, f-suffixed literals, float staging locals, and an explicit
+        // widening where SQL widens), and a FP32 Gram matrix measures 12.4x end to end (VERIFY
+        // T47) while the CPU's own FP32 sum is wrong by 2% at 16M rows (T46).
         if (!AccelIrBuilder.supports(call)) {
             return RowCost.ineligible(
                     "no accelerator IR for operator " + call.getOperator().getName());
