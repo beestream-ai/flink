@@ -59,7 +59,9 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
         minPlanVersion = FlinkVersion.v2_0,
         minStateVersion = FlinkVersion.v2_0)
 public class BatchExecNestedLoopJoin extends ExecNodeBase<RowData>
-        implements BatchExecNode<RowData>, SingleTransformationTranslator<RowData> {
+        implements BatchExecNode<RowData>,
+                SingleTransformationTranslator<RowData>,
+                org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode {
 
     public static final String JOIN_TRANSFORMATION = "nested-loop-join";
     public static final String FIELD_NAME_JOIN_TYPE = "joinType";
@@ -120,6 +122,45 @@ public class BatchExecNestedLoopJoin extends ExecNodeBase<RowData>
         this.condition = checkNotNull(condition);
         this.leftIsBuild = leftIsBuild;
         this.singleRowJoin = singleRowJoin;
+    }
+
+
+    /**
+     * This join as the inside of a device region, when both its sides are files.
+     *
+     * <p>Deliberately not paired with {@code supportGpuOffload()}. A nested-loop join that emits is
+     * the worst thing this project could put on a device — its output is the product of its inputs,
+     * so every pair crosses the interconnect — and the node still reports itself unoffloadable so
+     * nothing groups it into an operator region. What this says is narrower: if an aggregate above
+     * can consume the pairs where they are made, here is the subtree that describes doing so.
+     *
+     * <p>Both sides must reach a scan, looking through the broadcast exchange the planner puts
+     * under the build side. The region reads both files itself, so the exchange's job — putting a
+     * copy of the build side on every subtask — is something the region does by construction.
+     */
+    @Override
+    public java.util.Optional<org.apache.flink.table.accelerator.AccelNode> deviceJoin() {
+        if (getInputEdges().size() != 2) {
+            return java.util.Optional.empty();
+        }
+        final java.util.Optional<org.apache.flink.table.accelerator.AccelScan> left =
+                org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode
+                        .deviceScanBeneath(getInputEdges().get(0).getSource());
+        final java.util.Optional<org.apache.flink.table.accelerator.AccelScan> right =
+                org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode
+                        .deviceScanBeneath(getInputEdges().get(1).getSource());
+        if (!left.isPresent() || !right.isPresent()) {
+            return java.util.Optional.empty();
+        }
+        return org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder.buildJoinOver(
+                joinType,
+                condition,
+                leftIsBuild,
+                left.get(),
+                right.get(),
+                (RowType) getInputEdges().get(0).getOutputType(),
+                (RowType) getInputEdges().get(1).getOutputType(),
+                (RowType) getOutputType());
     }
 
     @Override

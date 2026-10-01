@@ -146,7 +146,27 @@ public final class AccelIrVersion {
      */
     public static final int V10 = 10;
 
-    public static final int CURRENT = V10;
+    /**
+     * Adds {@link AccelAggFunction#MAX}, and admits an {@link AccelJoin} beneath a projection
+     * inside a region — the first subtree offered to a provider that reads <em>two</em> sources.
+     *
+     * <p>The two halves fail a V10 provider in opposite ways. {@code MAX} is the mild one: a
+     * provider that switches on the function and has no case for it declines, and declining costs
+     * nothing. The join is not mild. Until now every region has been rooted at a single
+     * {@link AccelScan}, and a provider that walks to the leaf to find the file it must read will
+     * find <em>one</em> of the two and silently compute the query over it — a result of the right
+     * shape, from half the input.
+     *
+     * <p>Why a join is admitted inside a region at all, having been refused above one. A join's
+     * output is the product of its inputs, so an operator that emits the joined rows pays for
+     * every pair; inside a region nothing emits them, because the projection and the aggregate
+     * above consume the pairs on the device and only the aggregate's result crosses back. That is
+     * the difference between a shape a device can serve and one it cannot, and it is a property of
+     * the region rather than of the join.
+     */
+    public static final int V11 = 11;
+
+    public static final int CURRENT = V11;
 
     private AccelIrVersion() {}
 }

@@ -391,18 +391,35 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         if (!config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED)) {
             return java.util.Optional.empty();
         }
+        // A grouped aggregate is substituted only on the local half of a two-phase plan, where a
+        // Final above combines what the subtasks produced. The region reads whole files and emits
+        // one row per group it saw in them, so two subtasks that both saw a key each emit a row
+        // for it -- which is exactly what a partial aggregate is allowed to do and exactly what a
+        // final one is not. The ungrouped case needs no such guard: Flink only ever asks for an
+        // empty grouping on a local half in the first place.
+        if (grouping.length > 0 && isFinal) {
+            return java.util.Optional.empty();
+        }
         final org.apache.flink.table.planner.plan.nodes.exec.ExecNode<?> input =
                 inputEdge.getSource();
+        if (!(input
+                instanceof org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode)) {
+            return java.util.Optional.empty();
+        }
+        final org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode offloadable =
+                (org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode) input;
         // A scan directly beneath, or a projection that reaches one. The second is what admits a
         // query with arithmetic between the file and the aggregate, which is every query whose
         // aggregate is worth moving to a device at all.
         final java.util.Optional<org.apache.flink.table.accelerator.AccelNode> region =
-                input.deviceScan().isPresent()
-                        ? java.util.Optional.of(input.deviceScan().get())
-                        : input.deviceProjection();
+                offloadable.deviceScan().isPresent()
+                        ? java.util.Optional.of(offloadable.deviceScan().get())
+                        : offloadable.deviceProjection();
         if (!region.isPresent()) {
+            LOG.debug("no device region beneath this aggregate: {} offered none", input.getClass());
             return java.util.Optional.empty();
         }
+        LOG.debug("device region candidate rooted at {}", region.get().getClass().getSimpleName());
         // A projection in the region computes values, and a device rounds them differently. That
         // is the same give-up the Calc offload is gated on, so it is gated the same way here --
         // otherwise moving the arithmetic into the source would be a way to obtain approximate
@@ -410,6 +427,7 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         if (region.get() instanceof org.apache.flink.table.accelerator.AccelProject
                 && !config.get(
                         ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS)) {
+            LOG.debug("device region declined: it computes values and approximate-projections is off");
             return java.util.Optional.empty();
         }
         final RowType inputType = (RowType) inputEdge.getOutputType();
@@ -418,6 +436,10 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
                         grouping, java.util.Arrays.asList(aggCalls), region.get(), inputType,
                         (RowType) getOutputType());
         if (!subtree.isPresent()) {
+            LOG.debug(
+                    "the aggregate over the region is not expressible: {} keys, {} calls",
+                    grouping.length,
+                    aggCalls.length);
             return java.util.Optional.empty();
         }
         final java.util.Optional<org.apache.flink.api.connector.source.Source<RowData, ?, ?>>
@@ -425,6 +447,7 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
                         org.apache.flink.table.runtime.accelerator.AcceleratorProviders
                                 .createScanSource(subtree.get(), (RowType) getOutputType());
         if (!source.isPresent()) {
+            LOG.debug("no provider claimed the region rooted at {}", region.get().getClass());
             return java.util.Optional.empty();
         }
         LOG.info(

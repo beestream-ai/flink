@@ -158,13 +158,21 @@ public class BatchExecCalc extends CommonExecCalc implements BatchExecNode<RowDa
         if (!(input instanceof GpuOffloadExecNode)) {
             return Optional.empty();
         }
-        final Optional<org.apache.flink.table.accelerator.AccelScan> scan =
-                ((GpuOffloadExecNode) input).deviceScan();
-        if (!scan.isPresent()) {
+        // A scan, or a join over two of them. The second is what admits a projection whose
+        // expressions read columns from two files -- an inner product between a row of each --
+        // which is the one shape where the work beneath a projection grows faster than the bytes
+        // read, and therefore the one shape where what the device does can outweigh the read.
+        final Optional<org.apache.flink.table.accelerator.AccelNode> beneath =
+                ((GpuOffloadExecNode) input)
+                        .deviceScan()
+                        .<org.apache.flink.table.accelerator.AccelNode>map(scan -> scan)
+                        .map(Optional::of)
+                        .orElseGet(() -> ((GpuOffloadExecNode) input).deviceJoin());
+        if (!beneath.isPresent()) {
             return Optional.empty();
         }
         return AccelIrBuilder.buildProjectOver(
-                projection, condition, scan.get(), (RowType) getOutputType());
+                projection, condition, beneath.get(), (RowType) getOutputType());
     }
 
     /**

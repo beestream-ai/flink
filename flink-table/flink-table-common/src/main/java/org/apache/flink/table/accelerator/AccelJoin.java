@@ -67,6 +67,22 @@ public final class AccelJoin extends AccelNode {
     /** {@link #estimatedBuildRows()} when the planner had no estimate. */
     public static final long UNKNOWN_ROWS = -1L;
 
+    /**
+     * {@link #buildKeyField()} and {@link #probeKeyField()} when there is no equality at all: a
+     * cross join, where every build row pairs with every probe row.
+     *
+     * <p>Admitted in V11 and not before, because until a region could consume the pairs on the
+     * device a cross join was the one join shape it was never worth describing — its output is the
+     * product of its inputs and an operator that emits them is priced accordingly. Inside a region
+     * nothing emits them, and the shape becomes the one where a device has the most to offer: the
+     * arithmetic is quadratic in the rows while the bytes read stay linear in them.
+     *
+     * <p>A provider that does not expect this reads it as a field index, and {@code -1} indexes no
+     * column — so the failure is an exception rather than a wrong answer. That is the reason for
+     * the sentinel being negative rather than, say, the width of the row.
+     */
+    public static final int NO_KEY = -1;
+
     private final int buildKeyField;
     private final int probeKeyField;
     private final boolean buildIsLeft;

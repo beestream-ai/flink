@@ -136,6 +136,58 @@ public interface GpuOffloadExecNode {
     }
 
     /**
+     * The two-source subtree this node contributes, or empty.
+     *
+     * <p>The third of this set and the one that is not like the others: {@link #deviceScan()} asks
+     * "are you a file", {@link #deviceProjection()} asks "are you work that could sit on one", and
+     * this asks "are you work that could sit on <em>two</em>".
+     *
+     * <p>A node answering this is not saying it should be offloaded. A join offloaded on its own is
+     * priced by what it emits, which is the product of its inputs, and that is almost always a
+     * reason not to; the shape where it pays is one where nothing emits the pairs at all, because
+     * a projection consumes each on the device and an aggregate above reduces them away. So this
+     * is offered for an operator above to fold into a region, and the node still plans its ordinary
+     * CPU join unless something above substitutes one.
+     *
+     * <p>Empty by default, including for a join whose own inputs are not readable sources — the
+     * subtree has to reach both files to be worth anything.
+     */
+    default java.util.Optional<org.apache.flink.table.accelerator.AccelNode> deviceJoin() {
+        return java.util.Optional.empty();
+    }
+
+    /**
+     * The scan beneath {@code node}, looking through any exchange on the way.
+     *
+     * <p>An exchange is in the plan to move rows between subtasks, and a region does not move rows
+     * — it reads the files itself, on the subtask the region runs on. So an exchange between a
+     * region's root and the scan it reaches is not work the region has to reproduce, it is work the
+     * region makes unnecessary, and stopping at one would decline every plan that has one.
+     *
+     * <p>That is sound for a broadcast exchange, whose meaning is "every subtask sees all of it",
+     * which is exactly what a region reading the whole file on each subtask does. It is <em>not</em>
+     * sound for a hash exchange feeding a region that also reads its other side by split: the two
+     * sides would then be partitioned by different rules. A caller that looks through an exchange
+     * is therefore responsible for the split story on both sides, and the only caller today reads
+     * one side by split and the other whole.
+     */
+    static java.util.Optional<org.apache.flink.table.accelerator.AccelScan> deviceScanBeneath(
+            org.apache.flink.table.planner.plan.nodes.exec.ExecNode<?> node) {
+        org.apache.flink.table.planner.plan.nodes.exec.ExecNode<?> current = node;
+        while (current
+                        instanceof
+                        org.apache.flink.table.planner.plan.nodes.exec.batch
+                                .BatchExecExchange
+                && current.getInputEdges().size() == 1) {
+            current = current.getInputEdges().get(0).getSource();
+        }
+        if (!(current instanceof GpuOffloadExecNode)) {
+            return java.util.Optional.empty();
+        }
+        return ((GpuOffloadExecNode) current).deviceScan();
+    }
+
+    /**
      * Whether this node can take a device-resident batch as its input, rather than rows.
      *
      * <p>The difference between a device scan that pays for itself and one that pays for a read

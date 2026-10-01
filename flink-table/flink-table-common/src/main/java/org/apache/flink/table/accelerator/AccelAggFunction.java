@@ -24,8 +24,17 @@ import org.apache.flink.annotation.PublicEvolving;
  * Aggregate functions an accelerator IR can express.
  *
  * <p>Two, in V1. Both have a contraction a linear-algebra library can serve directly, which is the
- * property that made them worth admitting first. MIN and MAX have no such entry point, and DISTINCT
- * and the order statistics need sorting or hashing.
+ * property that made them worth admitting first. DISTINCT and the order statistics need sorting or
+ * hashing and are still outside this.
+ *
+ * <p>{@link #MAX} joined them in V11, and the reason it was excluded is worth recording because it
+ * turned out to be the wrong test. It was excluded for having "no entry point in a linear-algebra
+ * library", which is true of the aggregate read on its own and false of the shape it appears in: a
+ * nearest-neighbour query is {@code MAX} over an inner product, the inner product is a GEMM, and
+ * the maximum is the GEMM's epilogue. The library serves the expensive half and a kernel reduces
+ * what it produced. What makes an aggregate admissible is whether it is associative and
+ * commutative over a partition, which {@code MAX} is; whether a library computes it directly is a
+ * question about one provider.
  */
 @PublicEvolving
 public enum AccelAggFunction {
@@ -33,5 +42,11 @@ public enum AccelAggFunction {
     SUM,
 
     /** COUNT(*) — free: the operator already knows how many rows it staged. */
-    COUNT_STAR
+    COUNT_STAR,
+
+    /**
+     * Over no rows this is NULL, and over a partition it combines by taking the larger — so a
+     * partial per batch is a valid answer for a {@code Final} aggregate above to combine.
+     */
+    MAX
 }

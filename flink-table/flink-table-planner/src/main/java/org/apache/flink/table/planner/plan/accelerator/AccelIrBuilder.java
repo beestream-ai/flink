@@ -48,6 +48,7 @@ import org.apache.flink.table.planner.plan.gpu.GpuOverAggregateSupport;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.JoinSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.OverSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
+import org.apache.flink.table.runtime.operators.join.FlinkJoinType;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.DoubleType;
@@ -349,8 +350,19 @@ public final class AccelIrBuilder {
             if (call.isDistinct() || call.hasFilter() || call.getArgList().size() != 1) {
                 return Optional.empty();
             }
-            if (!"SUM".equals(call.getAggregation().getName())) {
-                return Optional.empty();
+            // SUM and MAX, and nothing else. Both combine associatively across batches, which is
+            // what makes a per-batch partial a valid answer for the Final aggregate above the
+            // substitution to combine. AVG and COUNT(x) do not, for different reasons.
+            final AccelAggFunction function;
+            switch (call.getAggregation().getName()) {
+                case "SUM":
+                    function = AccelAggFunction.SUM;
+                    break;
+                case "MAX":
+                    function = AccelAggFunction.MAX;
+                    break;
+                default:
+                    return Optional.empty();
             }
             final int valueField = call.getArgList().get(0);
             if (valueField >= inputType.getFieldCount()) {
@@ -367,7 +379,15 @@ public final class AccelIrBuilder {
                     aggCalls.get(0).getArgList().get(0)).getTypeRoot())) {
                 return Optional.empty();
             }
-            accelCalls.add(new AccelAggCall(AccelAggFunction.SUM, valueField, valueType));
+            accelCalls.add(new AccelAggCall(function, valueField, valueType));
+        }
+        // One function across all the calls. A provider serves the set as one contraction -- a
+        // Gram matrix is d(d+1)/2 sums of one shape -- and a mixture would be two contractions
+        // sharing a staging buffer, which is a different thing and is not described here.
+        for (AccelAggCall call : accelCalls) {
+            if (call.function() != accelCalls.get(0).function()) {
+                return Optional.empty();
+            }
         }
         for (int keyField : grouping) {
             if (keyField >= inputType.getFieldCount()
@@ -377,6 +397,99 @@ public final class AccelIrBuilder {
         }
         return Optional.of(
                 new AccelAggregate(grouping.clone(), accelCalls, input, outputType));
+    }
+
+    /**
+     * A join rooted at the two scans that feed it: the first region with two sources.
+     *
+     * <p>Offered only as the <em>inside</em> of a region, never as a node to be offloaded on its
+     * own. A join that emits is priced by its output, which is the product of its inputs; a join
+     * inside a region emits nothing, because the projection above consumes each pair on the device
+     * and the aggregate above that reduces them away. {@link
+     * org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecNestedLoopJoin} therefore
+     * exposes this and does not report itself offloadable.
+     *
+     * <p>Refusals here are of shape. The condition has to be one equality between one column of
+     * each side, because anything else is a predicate over a <em>pair</em> of rows and this IR has
+     * no node that evaluates one. The type has to be an inner join, because an outer one emits
+     * rows with no partner and the region's output would then depend on which pairs did not
+     * match. Both keys have to be {@code INT NOT NULL}: a device column has no representation for
+     * a null, and SQL says a null key matches nothing while a column with no mask would match it
+     * to every other null.
+     *
+     * @param leftIsBuild which side the planner chose to build, which decides nothing about the
+     *     output and everything about which side has to be resident
+     */
+    public static Optional<AccelNode> buildJoinOver(
+            FlinkJoinType joinType,
+            RexNode condition,
+            boolean leftIsBuild,
+            AccelNode left,
+            AccelNode right,
+            RowType leftType,
+            RowType rightType,
+            RowType outputType) {
+        if (joinType != FlinkJoinType.INNER) {
+            return Optional.empty();
+        }
+        // No condition, or one that is literally TRUE: a cross join. Calcite writes the second for
+        // `FROM a, b`, which is how a query asks for every pair -- and every pair is the shape
+        // this exists for, so it is admitted first and not as an afterthought.
+        if (condition == null || condition.isAlwaysTrue()) {
+            return Optional.of(
+                    new AccelJoin(
+                            AccelJoin.NO_KEY,
+                            AccelJoin.NO_KEY,
+                            leftIsBuild,
+                            AccelJoin.UNKNOWN_ROWS,
+                            leftIsBuild ? left : right,
+                            leftIsBuild ? right : left,
+                            outputType));
+        }
+        if (!(condition instanceof RexCall)
+                || ((RexCall) condition).getOperator().getKind() != SqlKind.EQUALS) {
+            return Optional.empty();
+        }
+        final List<RexNode> operands = ((RexCall) condition).getOperands();
+        if (operands.size() != 2
+                || !(operands.get(0) instanceof RexInputRef)
+                || !(operands.get(1) instanceof RexInputRef)) {
+            return Optional.empty();
+        }
+        final int leftWidth = leftType.getFieldCount();
+        int a = ((RexInputRef) operands.get(0)).getIndex();
+        int b = ((RexInputRef) operands.get(1)).getIndex();
+        // One index each side, in either order as Calcite wrote it.
+        if (a > b) {
+            final int swap = a;
+            a = b;
+            b = swap;
+        }
+        if (a >= leftWidth || b < leftWidth) {
+            return Optional.empty();
+        }
+        final int leftKey = a;
+        final int rightKey = b - leftWidth;
+        if (!isDenseIntKey(leftType, leftKey) || !isDenseIntKey(rightType, rightKey)) {
+            return Optional.empty();
+        }
+        return Optional.of(
+                new AccelJoin(
+                        leftIsBuild ? leftKey : rightKey,
+                        leftIsBuild ? rightKey : leftKey,
+                        leftIsBuild,
+                        AccelJoin.UNKNOWN_ROWS,
+                        leftIsBuild ? left : right,
+                        leftIsBuild ? right : left,
+                        outputType));
+    }
+
+    private static boolean isDenseIntKey(RowType type, int field) {
+        if (field >= type.getFieldCount()) {
+            return false;
+        }
+        final LogicalType key = type.getTypeAt(field);
+        return key instanceof IntType && !key.isNullable();
     }
 
     /**
