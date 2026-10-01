@@ -51,6 +51,7 @@ import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.DoubleType;
+import org.apache.flink.table.types.logical.FloatType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -334,22 +335,39 @@ public final class AccelIrBuilder {
             AccelNode input,
             RowType inputType,
             RowType outputType) {
-        if (grouping.length > 1 || aggCalls.size() != 1) {
+        if (grouping.length > 1 || aggCalls.isEmpty()) {
             return Optional.empty();
         }
-        final AggregateCall call = aggCalls.get(0);
-        if (call.isDistinct() || call.hasFilter() || call.getArgList().size() != 1) {
-            return Optional.empty();
-        }
-        if (!"SUM".equals(call.getAggregation().getName())) {
-            return Optional.empty();
-        }
-        final int valueField = call.getArgList().get(0);
-        if (valueField >= inputType.getFieldCount()) {
-            return Optional.empty();
-        }
-        if (!(inputType.getTypeAt(valueField) instanceof DoubleType)) {
-            return Optional.empty();
+        // More than one call is admitted because a contraction is many of them. A Gram matrix is
+        // d(d+1)/2 sums over one projection, and refusing past the first turned the one shape in
+        // this project whose advantage grows with the query into a shape the region could not
+        // carry. Which call means what is the provider's business -- the planner's job is to say
+        // that each is a plain SUM over a column of the input, and nothing here reads the
+        // aggregate as a Gram.
+        final List<AccelAggCall> accelCalls = new ArrayList<>(aggCalls.size());
+        for (AggregateCall call : aggCalls) {
+            if (call.isDistinct() || call.hasFilter() || call.getArgList().size() != 1) {
+                return Optional.empty();
+            }
+            if (!"SUM".equals(call.getAggregation().getName())) {
+                return Optional.empty();
+            }
+            final int valueField = call.getArgList().get(0);
+            if (valueField >= inputType.getFieldCount()) {
+                return Optional.empty();
+            }
+            // FLOAT beside DOUBLE: Flink sums a FLOAT column in a FLOAT accumulator, so an FP32
+            // query is FP32 on both arms and a provider that serves one is not quietly changing
+            // the arithmetic. Mixed widths across the calls are refused below.
+            final LogicalType valueType = inputType.getTypeAt(valueField);
+            if (!(valueType instanceof DoubleType) && !(valueType instanceof FloatType)) {
+                return Optional.empty();
+            }
+            if (!valueType.getTypeRoot().equals(inputType.getTypeAt(
+                    aggCalls.get(0).getArgList().get(0)).getTypeRoot())) {
+                return Optional.empty();
+            }
+            accelCalls.add(new AccelAggCall(AccelAggFunction.SUM, valueField, valueType));
         }
         for (int keyField : grouping) {
             if (keyField >= inputType.getFieldCount()
@@ -357,15 +375,8 @@ public final class AccelIrBuilder {
                 return Optional.empty();
             }
         }
-        final AccelAggCall accelCall =
-                new AccelAggCall(
-                        AccelAggFunction.SUM, valueField, inputType.getTypeAt(valueField));
         return Optional.of(
-                new AccelAggregate(
-                        grouping.clone(),
-                        java.util.Collections.singletonList(accelCall),
-                        input,
-                        outputType));
+                new AccelAggregate(grouping.clone(), accelCalls, input, outputType));
     }
 
     /**
