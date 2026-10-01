@@ -164,6 +164,7 @@ public final class AccelIrBuilder {
         BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.ATAN, AccelFunction.ATAN);
         BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.ATAN2, AccelFunction.ATAN2);
         BY_CALCITE_OPERATOR.put(SqlStdOperatorTable.SIGN, AccelFunction.SIGN);
+        BY_CALCITE_OPERATOR.put(FlinkSqlOperatorTable.REGEXP, AccelFunction.REGEXP);
 
         // Flink's own, on the Calcite side: no SqlStdOperatorTable entry exists for either.
         BY_CALCITE_OPERATOR.put(FlinkSqlOperatorTable.LOG2, AccelFunction.LOG2);
@@ -347,7 +348,23 @@ public final class AccelIrBuilder {
         // aggregate as a Gram.
         final List<AccelAggCall> accelCalls = new ArrayList<>(aggCalls.size());
         for (AggregateCall call : aggCalls) {
-            if (call.isDistinct() || call.hasFilter() || call.getArgList().size() != 1) {
+            if (call.isDistinct() || call.hasFilter()) {
+                return Optional.empty();
+            }
+            // COUNT(*) first, because it is the one call with no argument. COUNT(x) is not the
+            // same thing -- it skips nulls, so it needs the validity of x and not only its values.
+            if (call.getArgList().isEmpty()) {
+                if (!"COUNT".equals(call.getAggregation().getName())) {
+                    return Optional.empty();
+                }
+                accelCalls.add(
+                        new AccelAggCall(
+                                AccelAggFunction.COUNT_STAR,
+                                AccelAggCall.NO_INPUT_FIELD,
+                                outputType.getTypeAt(grouping.length + accelCalls.size())));
+                continue;
+            }
+            if (call.getArgList().size() != 1) {
                 return Optional.empty();
             }
             // SUM and MAX, and nothing else. Both combine associatively across batches, which is
@@ -375,8 +392,9 @@ public final class AccelIrBuilder {
             if (!(valueType instanceof DoubleType) && !(valueType instanceof FloatType)) {
                 return Optional.empty();
             }
-            if (!valueType.getTypeRoot().equals(inputType.getTypeAt(
-                    aggCalls.get(0).getArgList().get(0)).getTypeRoot())) {
+            if (!aggCalls.get(0).getArgList().isEmpty()
+                    && !valueType.getTypeRoot().equals(inputType.getTypeAt(
+                            aggCalls.get(0).getArgList().get(0)).getTypeRoot())) {
                 return Optional.empty();
             }
             accelCalls.add(new AccelAggCall(function, valueField, valueType));
@@ -388,6 +406,9 @@ public final class AccelIrBuilder {
             if (call.function() != accelCalls.get(0).function()) {
                 return Optional.empty();
             }
+        }
+        if (accelCalls.get(0).function() == AccelAggFunction.COUNT_STAR && accelCalls.size() != 1) {
+            return Optional.empty();
         }
         for (int keyField : grouping) {
             if (keyField >= inputType.getFieldCount()
@@ -511,7 +532,26 @@ public final class AccelIrBuilder {
             AccelNode input,
             RowType outputType) {
         if (condition != null) {
-            return Optional.empty();
+            // A filter inside a region is admitted where a filter under an offloaded Calc is not,
+            // and the difference is who consumes the mask. An offloaded Calc hands its rows back,
+            // so a mask the host must compact makes the subtree's row count a lie. A region ends
+            // in an aggregate that consumes the mask on the device and emits what it reduced to,
+            // so the row count the subtree claims is the aggregate's and is not affected.
+            final Optional<AccelExpression> predicate = convert(condition);
+            if (!predicate.isPresent()) {
+                return Optional.empty();
+            }
+            final List<AccelExpression> kept = new ArrayList<>(projection.size());
+            for (RexNode expression : projection) {
+                final Optional<AccelExpression> converted = convert(expression);
+                if (!converted.isPresent()) {
+                    return Optional.empty();
+                }
+                kept.add(converted.get());
+            }
+            return Optional.of(
+                    new AccelProject(
+                            kept, new AccelFilter(predicate.get(), input, outputType), outputType));
         }
         final List<AccelExpression> projections = new ArrayList<>(projection.size());
         for (RexNode expression : projection) {
@@ -760,6 +800,14 @@ public final class AccelIrBuilder {
             box = ((Number) value).doubleValue();
         } else if (value instanceof Boolean) {
             box = (Boolean) value;
+        } else if (value instanceof org.apache.calcite.util.NlsString) {
+            // A character literal, which until V12 nothing could use. It arrives as an NlsString
+            // carrying a charset and a collation; only the characters mean anything to a provider,
+            // and a literal in a non-UTF-8 charset is refused rather than transcoded.
+            final org.apache.calcite.util.NlsString nls = (org.apache.calcite.util.NlsString) value;
+            box = nls.getValue();
+        } else if (value instanceof String) {
+            box = (String) value;
         } else {
             return Optional.empty();
         }

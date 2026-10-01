@@ -166,7 +166,21 @@ public final class AccelIrVersion {
      */
     public static final int V11 = 11;
 
-    public static final int CURRENT = V11;
+    /**
+     * Adds {@link AccelFunction#REGEXP}, and with it the first expression over a character string.
+     *
+     * <p>Every function before this one takes numbers. A V11 provider that met this would be handed
+     * an operand whose type it has never staged — a variable-length string, which has no fixed-width
+     * buffer — and the kind of failure that produces is not a missing rendering but a provider
+     * reading an offset as a value.
+     *
+     * <p>It also carries a requirement the IR cannot express in a type: the pattern operand must be
+     * a literal, because a pattern is compiled. The planner refuses a non-literal rather than
+     * offering one, so a provider never sees it; the bump is for the operand type.
+     */
+    public static final int V12 = 12;
+
+    public static final int CURRENT = V12;
 
     private AccelIrVersion() {}
 }

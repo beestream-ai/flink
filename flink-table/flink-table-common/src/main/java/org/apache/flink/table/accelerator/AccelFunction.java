@@ -83,5 +83,18 @@ public enum AccelFunction {
     SIGN,
     LEAST,
     GREATEST,
+
+    /**
+     * {@code REGEXP(string, pattern)} — true when the pattern matches anywhere in the string.
+     *
+     * <p>The first function here whose operand is a character string rather than a number, and the
+     * first whose second operand must be a literal: a pattern is compiled, and compiling one per
+     * row is not a thing any implementation does. A provider that cannot compile the pattern, or
+     * that implements a dialect the query's engine does not, must decline the expression rather
+     * than match approximately — Flink evaluates this with {@code java.util.regex}, and a provider
+     * whose regex differs in lookaround or Unicode classes would return a different answer, not a
+     * faster one.
+     */
+    REGEXP,
     CAST
 }

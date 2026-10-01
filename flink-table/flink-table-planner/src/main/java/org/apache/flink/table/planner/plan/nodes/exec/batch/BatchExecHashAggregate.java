@@ -376,6 +376,75 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
     }
 
     /**
+     * Whether anything in this region computes a value a device may round differently.
+     *
+     * <p>The gate this feeds exists because floating-point arithmetic on a device need not agree
+     * with {@code java.lang.Math} in the last place, and a query that never asked for approximate
+     * results should not get them by having its arithmetic moved. That reasoning is about
+     * arithmetic, and the check was about <em>shape</em> — any projection at all — which refuses
+     * regions that compute nothing of the kind. A regex match, a comparison and a boolean
+     * combination are exact on both sides, and a region made only of those is not approximating
+     * anything.
+     *
+     * <p>Conservative by construction: only the functions listed here are treated as exact, so a
+     * function added to the IR later is covered by the gate until someone decides otherwise.
+     */
+    private static boolean mayRoundDifferently(
+            org.apache.flink.table.accelerator.AccelNode node) {
+        if (node instanceof org.apache.flink.table.accelerator.AccelProject) {
+            for (org.apache.flink.table.accelerator.AccelExpression expression :
+                    ((org.apache.flink.table.accelerator.AccelProject) node).projections()) {
+                if (mayRoundDifferently(expression)) {
+                    return true;
+                }
+            }
+        } else if (node instanceof org.apache.flink.table.accelerator.AccelFilter) {
+            if (mayRoundDifferently(
+                    ((org.apache.flink.table.accelerator.AccelFilter) node).condition())) {
+                return true;
+            }
+        }
+        for (org.apache.flink.table.accelerator.AccelNode input : node.inputs()) {
+            if (mayRoundDifferently(input)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean mayRoundDifferently(
+            org.apache.flink.table.accelerator.AccelExpression expression) {
+        if (!(expression instanceof org.apache.flink.table.accelerator.AccelCall)) {
+            return false;
+        }
+        final org.apache.flink.table.accelerator.AccelCall call =
+                (org.apache.flink.table.accelerator.AccelCall) expression;
+        switch (call.function()) {
+            case AND:
+            case OR:
+            case NOT:
+            case EQUALS:
+            case NOT_EQUALS:
+            case LESS_THAN:
+            case LESS_OR_EQUAL:
+            case GREATER_THAN:
+            case GREATER_OR_EQUAL:
+            case IS_NULL:
+            case IS_NOT_NULL:
+            case REGEXP:
+                break;
+            default:
+                return true;
+        }
+        for (org.apache.flink.table.accelerator.AccelExpression operand : call.operands()) {
+            if (mayRoundDifferently(operand)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * The provider's source for a local aggregate directly over a readable scan, or empty.
      *
      * <p>Narrow, and declining is always free: the path below builds exactly the plan it built
@@ -425,6 +494,7 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         // otherwise moving the arithmetic into the source would be a way to obtain approximate
         // results under a configuration that refuses them.
         if (region.get() instanceof org.apache.flink.table.accelerator.AccelProject
+                && mayRoundDifferently(region.get())
                 && !config.get(
                         ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS)) {
             LOG.debug("device region declined: it computes values and approximate-projections is off");
