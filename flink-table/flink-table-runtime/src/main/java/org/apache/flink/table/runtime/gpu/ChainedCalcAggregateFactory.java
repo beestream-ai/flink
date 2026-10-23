@@ -19,11 +19,14 @@
 package org.apache.flink.table.runtime.gpu;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.table.data.RowData;
+
+import javax.annotation.Nullable;
 
 /**
  * Runs a projection and the aggregate above it inside one operator, on the CPU.
@@ -53,18 +56,37 @@ public final class ChainedCalcAggregateFactory extends AbstractStreamOperatorFac
     private final StreamOperatorFactory<RowData> calcFactory;
     private final StreamOperatorFactory<RowData> aggregateFactory;
 
+    /**
+     * What the {@code Calc} emits, or null to keep the original wiring. Needed only where the
+     * downstream operator takes its input serializer from the StreamConfig rather than reading
+     * fields by index — {@code SortOperator} does, a generated aggregate does not.
+     */
+    private final @Nullable TypeSerializer<RowData> downstreamInputSerializer;
+
     public ChainedCalcAggregateFactory(
             StreamOperatorFactory<RowData> calcFactory,
             StreamOperatorFactory<RowData> aggregateFactory) {
+        this(calcFactory, aggregateFactory, null);
+    }
+
+    public ChainedCalcAggregateFactory(
+            StreamOperatorFactory<RowData> calcFactory,
+            StreamOperatorFactory<RowData> aggregateFactory,
+            @Nullable TypeSerializer<RowData> downstreamInputSerializer) {
         this.calcFactory = calcFactory;
         this.aggregateFactory = aggregateFactory;
+        this.downstreamInputSerializer = downstreamInputSerializer;
     }
 
     @Override
     public <T extends StreamOperator<RowData>> T createStreamOperator(
             StreamOperatorParameters<RowData> parameters) {
         return ChainedCalcAggregateOperator.chain(
-                parameters, calcFactory, aggregateFactory, processingTimeService);
+                parameters,
+                calcFactory,
+                aggregateFactory,
+                processingTimeService,
+                downstreamInputSerializer);
     }
 
     @Override

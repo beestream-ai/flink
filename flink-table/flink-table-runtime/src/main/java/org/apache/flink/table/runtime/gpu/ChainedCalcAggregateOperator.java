@@ -19,9 +19,11 @@
 package org.apache.flink.table.runtime.gpu;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.metrics.groups.OperatorMetricGroup;
 import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.operators.BoundedOneInput;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.OperatorSnapshotFutures;
@@ -38,6 +40,8 @@ import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeServiceAware;
 import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
 import org.apache.flink.table.data.RowData;
+
+import javax.annotation.Nullable;
 
 /**
  * Runs the code-generated {@code Calc} and the code-generated aggregate as one operator.
@@ -90,13 +94,35 @@ public final class ChainedCalcAggregateOperator
             StreamOperatorParameters<RowData> parameters,
             StreamOperatorFactory<RowData> calcFactory,
             StreamOperatorFactory<RowData> aggregateFactory,
-            ProcessingTimeService processingTimeService) {
+            ProcessingTimeService processingTimeService,
+            @Nullable TypeSerializer<RowData> downstreamInputSerializer) {
 
         propagate(aggregateFactory, processingTimeService);
         propagate(calcFactory, processingTimeService);
 
+        // The downstream operator consumes what the Calc emits, but the parameters it would
+        // otherwise be handed carry the fused node's StreamConfig, which describes what the Calc
+        // consumes. A generated aggregate reads fields by index and never notices; SortOperator
+        // takes its input serializer from the config, so it threw on the first record.
+        // Null keeps the original wiring, so the aggregate path is unchanged.
+        StreamOperatorParameters<RowData> downstreamParameters = parameters;
+        if (downstreamInputSerializer != null) {
+            final StreamConfig downstream =
+                    new StreamConfig(parameters.getStreamConfig().getConfiguration().clone());
+            downstream.setupNetworkInputs(downstreamInputSerializer);
+            downstream.serializeAllConfigs();
+            downstreamParameters =
+                    new StreamOperatorParameters<>(
+                            parameters.getContainingTask(),
+                            downstream,
+                            parameters.getOutput(),
+                            parameters::getProcessingTimeService,
+                            parameters.getOperatorEventDispatcher(),
+                            parameters.getMailboxExecutor());
+        }
+
         OneInputStreamOperator<RowData, RowData> aggregate =
-                aggregateFactory.createStreamOperator(parameters);
+                aggregateFactory.createStreamOperator(downstreamParameters);
 
         Output<StreamRecord<RowData>> intoAggregate =
                 new Forwarding(aggregate, parameters.getOutput());

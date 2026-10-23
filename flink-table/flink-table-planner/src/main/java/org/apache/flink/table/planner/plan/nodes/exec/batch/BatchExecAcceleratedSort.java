@@ -20,13 +20,16 @@ package org.apache.flink.table.planner.plan.nodes.exec.batch;
 
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
+import org.apache.flink.table.accelerator.AccelFunction;
 import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
 import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
+import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
@@ -122,7 +125,13 @@ public class BatchExecAcceleratedSort extends ExecNodeBase<RowData>
                 substitute(
                         config,
                         (RowType) inputEdge.getOutputType(),
-                        new ChainedCalcAggregateFactory(calcFactory, generated.factory)),
+                        // SortOperator takes its input serializer from the StreamConfig, and the
+                        // fused node's config describes the Calc's input, not its output.
+                        new ChainedCalcAggregateFactory(
+                                calcFactory,
+                                generated.factory,
+                                InternalTypeInfo.of((RowType) calc.getOutputType())
+                                        .toSerializer())),
                 InternalTypeInfo.of((RowType) getOutputType()),
                 inputTransform.getParallelism(),
                 generated.managedMemory,
@@ -161,10 +170,42 @@ public class BatchExecAcceleratedSort extends ExecNodeBase<RowData>
         AcceleratedCalcSpec spec =
                 new AcceleratedCalcSpec(
                         subtree.get(),
-                        assignment.verdict().work(),
+                        withSortCardinality(assignment.verdict().work()),
                         (RowType) getOutputType(),
                         config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE),
                         config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
         return new GpuOrCpuCalcOperatorFactory(spec, onCpu);
+    }
+
+    /**
+     * The fused profile, carrying the sort's cardinality where the Calc's had none.
+     *
+     * <p>A {@code Calc}'s estimate is frequently unknown and the sort beneath the fusion has one,
+     * so without this the fusion dropped it — and {@code GpuSortSupport} refuses a sort of unknown
+     * cardinality, making the fused region impossible to accept on any shape. Only fills a gap: an
+     * estimate already present is returned untouched.
+     */
+    private AccelWorkProfile withSortCardinality(AccelWorkProfile work) {
+        if (work == null || work.estimatedRows() != AccelWorkProfile.UNKNOWN_ROWS) {
+            return work;
+        }
+        final RowCost sortCost = sort.estimateRowCost();
+        if (!sortCost.isEligible() || sortCost.work() == null) {
+            return work;
+        }
+        final long rows = sortCost.work().estimatedRows();
+        if (rows <= 0) {
+            return work;
+        }
+        final int[] ops = new int[AccelFunction.values().length];
+        for (AccelFunction function : AccelFunction.values()) {
+            ops[function.ordinal()] = work.count(function);
+        }
+        return new AccelWorkProfile(
+                ops,
+                work.inputBytesPerRow(),
+                work.outputBytesPerRow(),
+                rows,
+                work.requiresStrictArithmetic());
     }
 }
