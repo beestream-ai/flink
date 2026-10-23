@@ -208,7 +208,13 @@ public class BatchExecSort extends ExecNodeBase<RowData>
                         (RowType) getOutputType(),
                         config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE),
                         config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
-        return new GpuOrCpuCalcOperatorFactory(spec, onCpu);
+        // Without the cap this node fell back to the factory's hardcoded 1 and declined every
+        // subtask above one, while naming an option it never read. Default is 1, so passing it
+        // changes nothing unless an operator raises it.
+        return new GpuOrCpuCalcOperatorFactory(
+                spec,
+                onCpu,
+                config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MAX_PARALLELISM));
     }
 
     /**
