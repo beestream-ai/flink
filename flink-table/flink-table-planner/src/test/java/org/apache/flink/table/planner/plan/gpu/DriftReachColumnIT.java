@@ -134,7 +134,8 @@ class DriftReachColumnIT {
                                 + " AS d FROM t) WHERE d > 0.5 GROUP BY k");
 
         assertThat(plan)
-                .withFailMessage("a predicate over a drifting value selects different rows:\n" + plan)
+                .withFailMessage(
+                        "a predicate over a drifting value selects different rows:\n" + plan)
                 .contains(REFUSED);
     }
 
@@ -186,7 +187,8 @@ class DriftReachColumnIT {
 
         assertThat(plan).contains("Limit");
         assertThat(plan)
-                .withFailMessage("the limit runs before the projection, so nothing drifts:\n" + plan)
+                .withFailMessage(
+                        "the limit runs before the projection, so nothing drifts:\n" + plan)
                 .doesNotContain(REFUSED);
     }
 }

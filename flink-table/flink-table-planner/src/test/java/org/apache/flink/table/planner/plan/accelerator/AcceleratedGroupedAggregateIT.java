@@ -70,7 +70,8 @@ class AcceleratedGroupedAggregateIT {
                         + "'fields.val.kind' = 'sequence',"
                         + "'fields.val.start' = '1', 'fields.val.end' = '400')");
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         // The device route for a grouped aggregate lives on the fused node, so fusion is what
         // reaches it. M4.5 turned the default off because the fused pair had nowhere to run;
         // this is the case that gives it somewhere.

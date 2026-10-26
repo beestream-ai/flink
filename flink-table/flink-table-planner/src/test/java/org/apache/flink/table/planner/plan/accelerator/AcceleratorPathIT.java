@@ -130,7 +130,8 @@ class AcceleratorPathIT {
     @DisplayName("the accelerator path actually runs, and the provider sees the rows")
     void acceleratorPathRuns() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         TestAcceleratorProvider.enable(10.0);
 
         List<Row> rows = run(QUERY);
@@ -148,7 +149,8 @@ class AcceleratorPathIT {
     @DisplayName("with no provider willing, the CPU runs and the results are identical")
     void resultsMatchTheCpuPath() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         TestAcceleratorProvider.enable(10.0);
         List<Row> accelerated = run(QUERY);
         int seen = TestAcceleratorProvider.ROWS_PROCESSED.get();
@@ -180,7 +182,8 @@ class AcceleratorPathIT {
     @DisplayName("a null in a pass-through column survives the accelerator as a null, not a zero")
     void nullPassThroughSurvives() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         TestAcceleratorProvider.enable(4.0);
 
         List<Row> accelerated = run(NULLABLE_QUERY);
@@ -201,7 +204,8 @@ class AcceleratorPathIT {
     @DisplayName("and the CPU produces exactly the same rows for the same query")
     void nullPassThroughMatchesTheCpuPath() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         TestAcceleratorProvider.enable(4.0);
         List<Row> accelerated = run(NULLABLE_QUERY);
         int seen = TestAcceleratorProvider.ROWS_PROCESSED.get();
@@ -231,7 +235,8 @@ class AcceleratorPathIT {
     @DisplayName("a FLOAT expression is left on the CPU rather than offloaded")
     void floatExpressionStaysOnTheCpu() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         TestAcceleratorProvider.enable(10.0);
 
         List<Row> accelerated = run(FLOAT_QUERY);
@@ -262,7 +267,8 @@ class AcceleratorPathIT {
     @DisplayName("the batch size comes from the slot's budget, not from the configured ceiling")
     void batchSizeComesFromTheSlotBudget() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         TestAcceleratorProvider.enable(10.0);
 
         run(QUERY);
@@ -293,7 +299,8 @@ class AcceleratorPathIT {
     @DisplayName("the gauge reads 1 when a provider served the subtask")
     void acceleratedSubtaskReportsItself() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         TestAcceleratorProvider.enable(10.0);
 
         run(QUERY);
@@ -322,7 +329,8 @@ class AcceleratorPathIT {
             "a device failing in open() finishes on the generated operator, with the same rows")
     void deviceFailingAtOpenFallsBack() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         TestAcceleratorProvider.enable(10.0);
         TestAcceleratorProvider.failOnOpen();
 
@@ -341,7 +349,8 @@ class AcceleratorPathIT {
     @DisplayName("a provider claiming to be slower is refused, and the CPU runs instead")
     void slowProviderIsRefused() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         // 0.54x is the measured figure for the query the planner used to refuse at plan time.
         TestAcceleratorProvider.enable(0.54);
 
@@ -360,7 +369,8 @@ class AcceleratorPathIT {
     @DisplayName("the provider declines by default, so its presence reroutes nothing")
     void declinesUnlessEnabled() {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
 
         run(QUERY);
 

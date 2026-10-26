@@ -98,8 +98,8 @@ public interface GpuOffloadExecNode {
     }
 
     /**
-     * The scan this node is, as IR a provider can be asked about — or empty when it is not a scan
-     * a device could read.
+     * The scan this node is, as IR a provider can be asked about — or empty when it is not a scan a
+     * device could read.
      *
      * <p>Separate from {@link #supportGpuOffload()} on purpose, and the separation is the point.
      * That flag puts a node into the grouping that decides which operators run together on a
@@ -119,8 +119,8 @@ public interface GpuOffloadExecNode {
     /**
      * The device subtree this node contributes on top of a scan beneath it, or empty.
      *
-     * <p>Where {@link #deviceScan()} asks "are you a readable source", this asks "are you work
-     * that could stay on the device with the source that feeds you". A projection answers it: the
+     * <p>Where {@link #deviceScan()} asks "are you a readable source", this asks "are you work that
+     * could stay on the device with the source that feeds you". A projection answers it: the
      * expressions it evaluates become a kernel between the read and whatever consumes the result,
      * so an operator above can offer the whole region to a provider as one subtree.
      *
@@ -144,9 +144,9 @@ public interface GpuOffloadExecNode {
      *
      * <p>A node answering this is not saying it should be offloaded. A join offloaded on its own is
      * priced by what it emits, which is the product of its inputs, and that is almost always a
-     * reason not to; the shape where it pays is one where nothing emits the pairs at all, because
-     * a projection consumes each on the device and an aggregate above reduces them away. So this
-     * is offered for an operator above to fold into a region, and the node still plans its ordinary
+     * reason not to; the shape where it pays is one where nothing emits the pairs at all, because a
+     * projection consumes each on the device and an aggregate above reduces them away. So this is
+     * offered for an operator above to fold into a region, and the node still plans its ordinary
      * CPU join unless something above substitutes one.
      *
      * <p>Empty by default, including for a join whose own inputs are not readable sources — the
@@ -165,19 +165,18 @@ public interface GpuOffloadExecNode {
      * region makes unnecessary, and stopping at one would decline every plan that has one.
      *
      * <p>That is sound for a broadcast exchange, whose meaning is "every subtask sees all of it",
-     * which is exactly what a region reading the whole file on each subtask does. It is <em>not</em>
-     * sound for a hash exchange feeding a region that also reads its other side by split: the two
-     * sides would then be partitioned by different rules. A caller that looks through an exchange
-     * is therefore responsible for the split story on both sides, and the only caller today reads
-     * one side by split and the other whole.
+     * which is exactly what a region reading the whole file on each subtask does. It is
+     * <em>not</em> sound for a hash exchange feeding a region that also reads its other side by
+     * split: the two sides would then be partitioned by different rules. A caller that looks
+     * through an exchange is therefore responsible for the split story on both sides, and the only
+     * caller today reads one side by split and the other whole.
      */
     static java.util.Optional<org.apache.flink.table.accelerator.AccelScan> deviceScanBeneath(
             org.apache.flink.table.planner.plan.nodes.exec.ExecNode<?> node) {
         org.apache.flink.table.planner.plan.nodes.exec.ExecNode<?> current = node;
         while (current
                         instanceof
-                        org.apache.flink.table.planner.plan.nodes.exec.batch
-                                .BatchExecExchange
+                        org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecExchange
                 && current.getInputEdges().size() == 1) {
             current = current.getInputEdges().get(0).getSource();
         }
@@ -190,9 +189,9 @@ public interface GpuOffloadExecNode {
     /**
      * Whether this node can take a device-resident batch as its input, rather than rows.
      *
-     * <p>The difference between a device scan that pays for itself and one that pays for a read
-     * and a copy back and gains nothing. False for every operator until one can, which is why
-     * every scan is declined today and declined <em>by the rule</em> rather than by a constant.
+     * <p>The difference between a device scan that pays for itself and one that pays for a read and
+     * a copy back and gains nothing. False for every operator until one can, which is why every
+     * scan is declined today and declined <em>by the rule</em> rather than by a constant.
      */
     default boolean consumesDeviceInput() {
         return false;
@@ -220,12 +219,12 @@ public interface GpuOffloadExecNode {
      *
      * <p>The provenance walk is forward, and every node it crosses re-indexes the row. Without a
      * mapping the walk has to fall back to "assume every column drifts" at the first node it does
-     * not understand, and from there it refuses everything downstream -- which is what made
-     * {@code SELECT COUNT(*), SUM(g) FROM (SELECT k, SUM(km) AS km ... GROUP BY k)} unofferable
-     * even though nothing in it groups, filters or orders by a drifting value.
+     * not understand, and from there it refuses everything downstream -- which is what made {@code
+     * SELECT COUNT(*), SUM(g) FROM (SELECT k, SUM(km) AS km ... GROUP BY k)} unofferable even
+     * though nothing in it groups, filters or orders by a drifting value.
      *
-     * <p>Null is the conservative answer and the default: it does not by itself refuse the node,
-     * it only costs the precision of the question asked about everything beyond it.
+     * <p>Null is the conservative answer and the default: it does not by itself refuse the node, it
+     * only costs the precision of the question asked about everything beyond it.
      *
      * @param incoming drifting column indexes in this node's <em>input</em> row
      */

@@ -90,7 +90,8 @@ class DeviceBatchTest {
     @Test
     void noAccessorMaterialisesARow() {
         List<String> offenders = new ArrayList<>();
-        for (Class<?> type : Arrays.asList(DeviceBatch.class, DeviceColumn.class, DeviceBuffer.class)) {
+        for (Class<?> type :
+                Arrays.asList(DeviceBatch.class, DeviceColumn.class, DeviceBuffer.class)) {
             for (Method method : type.getDeclaredMethods()) {
                 if (method.isSynthetic() || method.getParameterCount() > 1) {
                     continue;

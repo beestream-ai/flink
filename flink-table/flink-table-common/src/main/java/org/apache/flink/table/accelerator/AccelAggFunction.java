@@ -32,9 +32,9 @@ import org.apache.flink.annotation.PublicEvolving;
  * library", which is true of the aggregate read on its own and false of the shape it appears in: a
  * nearest-neighbour query is {@code MAX} over an inner product, the inner product is a GEMM, and
  * the maximum is the GEMM's epilogue. The library serves the expensive half and a kernel reduces
- * what it produced. What makes an aggregate admissible is whether it is associative and
- * commutative over a partition, which {@code MAX} is; whether a library computes it directly is a
- * question about one provider.
+ * what it produced. What makes an aggregate admissible is whether it is associative and commutative
+ * over a partition, which {@code MAX} is; whether a library computes it directly is a question
+ * about one provider.
  */
 @PublicEvolving
 public enum AccelAggFunction {

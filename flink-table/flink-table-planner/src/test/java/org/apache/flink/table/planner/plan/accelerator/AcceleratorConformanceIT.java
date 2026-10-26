@@ -350,7 +350,10 @@ class AcceleratorConformanceIT {
 
             tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
 
-            tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+            tEnv.getConfig()
+                    .set(
+                            ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS,
+                            true);
             TestAcceleratorProvider.enable(10.0);
             List<Row> onAccelerator = run(sql);
             int rowsSeen = TestAcceleratorProvider.ROWS_PROCESSED.get();
@@ -421,7 +424,8 @@ class AcceleratorConformanceIT {
 
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
 
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
         TestAcceleratorProvider.enable(10.0);
         TestAcceleratorProvider.corruptArithmetic();
         List<Row> corrupted = run(sql);

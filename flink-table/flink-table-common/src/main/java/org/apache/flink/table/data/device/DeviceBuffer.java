@@ -23,9 +23,9 @@ import org.apache.flink.annotation.PublicEvolving;
 /**
  * A region of memory on an accelerator, named but not described.
  *
- * <p>Flink deliberately cannot read this. A device pointer means something only to the runtime
- * that allocated it, and any accessor Flink offered here would either be a lie or would force a
- * copy back to the host — which is the cost {@link DeviceBatch} exists to avoid. So this interface
+ * <p>Flink deliberately cannot read this. A device pointer means something only to the runtime that
+ * allocated it, and any accessor Flink offered here would either be a lie or would force a copy
+ * back to the host — which is the cost {@link DeviceBatch} exists to avoid. So this interface
  * carries no data accessor at all: it says how large the region is, and it releases it.
  *
  * <p>Implementations live in a provider, never here. Nothing in this package names a vendor.
@@ -39,8 +39,8 @@ public interface DeviceBuffer {
     /**
      * Releases the region.
      *
-     * <p>Must tolerate being called more than once and free the region exactly once — a second
-     * free is a crash rather than a leak, and the batch this buffer belongs to may be closed by a
+     * <p>Must tolerate being called more than once and free the region exactly once — a second free
+     * is a crash rather than a leak, and the batch this buffer belongs to may be closed by a
      * failure path that cannot know whether the normal path ran first.
      */
     void release();

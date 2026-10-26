@@ -51,7 +51,8 @@ class GpuMixedTypeColumnIT {
                 "CREATE TABLE mixed (id BIGINT NOT NULL, i INT NOT NULL, f FLOAT NOT NULL, d DOUBLE NOT NULL, b BOOLEAN NOT NULL) WITH ("
                         + "'connector' = 'datagen', 'number-of-rows' = '2000000')");
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
     }
 
     private void assertOffloads(String label, String sql) {

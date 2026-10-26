@@ -101,10 +101,10 @@ public final class AccelIrVersion {
     /**
      * Adds a limit to {@link AccelSort}, so a top-N is one node rather than a sort under a limit.
      *
-     * <p>Bumped rather than added quietly, and this one is not mild. A V7 provider reads
-     * {@code AccelSort} as "order every row and give them all back"; a V8 planner may hand it a
-     * node meaning "order every row and give back the first thousand". The two differ in the row
-     * count of the answer, not in whether a rendering exists — so a provider that met the new node
+     * <p>Bumped rather than added quietly, and this one is not mild. A V7 provider reads {@code
+     * AccelSort} as "order every row and give them all back"; a V8 planner may hand it a node
+     * meaning "order every row and give back the first thousand". The two differ in the row count
+     * of the answer, not in whether a rendering exists — so a provider that met the new node
      * unprepared would return a correct ordering of the wrong number of rows, and nothing
      * downstream would notice.
      */
@@ -114,11 +114,11 @@ public final class AccelIrVersion {
      * Adds {@link AccelScan}, a leaf that reads from storage instead of receiving rows.
      *
      * <p>The bump is for a leaf a V8 provider has never been shown. Every subtree it has been
-     * offered is rooted at {@link AccelInput}, whose meaning is "rows arrive, already on the
-     * host"; a V9 planner may root one at a scan, whose meaning is "read this file yourself".
-     * A provider that walked to the leaf and assumed it was an input would read a format string
-     * and a list of paths as though rows were waiting behind them, and there is no shape check
-     * that would catch it — both are leaves producing a row type.
+     * offered is rooted at {@link AccelInput}, whose meaning is "rows arrive, already on the host";
+     * a V9 planner may root one at a scan, whose meaning is "read this file yourself". A provider
+     * that walked to the leaf and assumed it was an input would read a format string and a list of
+     * paths as though rows were waiting behind them, and there is no shape check that would catch
+     * it — both are leaves producing a row type.
      *
      * <p>Mild in one respect and not in another. A provider that declines the subtree is correct
      * and loses nothing, because declining a scan plans the CPU source Flink would have planned
@@ -130,19 +130,19 @@ public final class AccelIrVersion {
      * Admits a projection between an {@link AccelAggregate} and an {@link AccelScan}, and an
      * aggregate with no grouping key at all.
      *
-     * <p>Both halves are new and a V9 provider mishandles each differently. It has seen
-     * {@code Aggregate(Scan)}, where every column the aggregate names is read straight out of the
-     * file; it has never seen {@code Aggregate(Project(Scan))}, where the summed column does not
-     * exist until a kernel computes it. A provider that walked past the projection to the scan
-     * beneath would sum a column of the file instead of the expression over it -- a plausible
-     * number, of the right type, from the wrong column.
+     * <p>Both halves are new and a V9 provider mishandles each differently. It has seen {@code
+     * Aggregate(Scan)}, where every column the aggregate names is read straight out of the file; it
+     * has never seen {@code Aggregate(Project(Scan))}, where the summed column does not exist until
+     * a kernel computes it. A provider that walked past the projection to the scan beneath would
+     * sum a column of the file instead of the expression over it -- a plausible number, of the
+     * right type, from the wrong column.
      *
      * <p>The empty grouping is the sharper half. Every {@code AccelAggregate} before this had at
      * least one key, so a provider may reasonably emit one row per distinct key and never consider
-     * what an empty key list means. Handed one, it either emits nothing or emits per-batch
-     * partials that nothing downstream knows to combine. Flink puts a {@code Final} aggregate
-     * above the substituted {@code Local} one, so partials <em>are</em> the contract here -- but
-     * that is a contract a V9 provider was never told about.
+     * what an empty key list means. Handed one, it either emits nothing or emits per-batch partials
+     * that nothing downstream knows to combine. Flink puts a {@code Final} aggregate above the
+     * substituted {@code Local} one, so partials <em>are</em> the contract here -- but that is a
+     * contract a V9 provider was never told about.
      */
     public static final int V10 = 10;
 
@@ -152,17 +152,17 @@ public final class AccelIrVersion {
      *
      * <p>The two halves fail a V10 provider in opposite ways. {@code MAX} is the mild one: a
      * provider that switches on the function and has no case for it declines, and declining costs
-     * nothing. The join is not mild. Until now every region has been rooted at a single
-     * {@link AccelScan}, and a provider that walks to the leaf to find the file it must read will
-     * find <em>one</em> of the two and silently compute the query over it — a result of the right
-     * shape, from half the input.
+     * nothing. The join is not mild. Until now every region has been rooted at a single {@link
+     * AccelScan}, and a provider that walks to the leaf to find the file it must read will find
+     * <em>one</em> of the two and silently compute the query over it — a result of the right shape,
+     * from half the input.
      *
      * <p>Why a join is admitted inside a region at all, having been refused above one. A join's
-     * output is the product of its inputs, so an operator that emits the joined rows pays for
-     * every pair; inside a region nothing emits them, because the projection and the aggregate
-     * above consume the pairs on the device and only the aggregate's result crosses back. That is
-     * the difference between a shape a device can serve and one it cannot, and it is a property of
-     * the region rather than of the join.
+     * output is the product of its inputs, so an operator that emits the joined rows pays for every
+     * pair; inside a region nothing emits them, because the projection and the aggregate above
+     * consume the pairs on the device and only the aggregate's result crosses back. That is the
+     * difference between a shape a device can serve and one it cannot, and it is a property of the
+     * region rather than of the join.
      */
     public static final int V11 = 11;
 
@@ -170,9 +170,9 @@ public final class AccelIrVersion {
      * Adds {@link AccelFunction#REGEXP}, and with it the first expression over a character string.
      *
      * <p>Every function before this one takes numbers. A V11 provider that met this would be handed
-     * an operand whose type it has never staged — a variable-length string, which has no fixed-width
-     * buffer — and the kind of failure that produces is not a missing rendering but a provider
-     * reading an offset as a value.
+     * an operand whose type it has never staged — a variable-length string, which has no
+     * fixed-width buffer — and the kind of failure that produces is not a missing rendering but a
+     * provider reading an offset as a value.
      *
      * <p>It also carries a requirement the IR cannot express in a type: the pattern operand must be
      * a literal, because a pattern is compiled. The planner refuses a non-literal rather than

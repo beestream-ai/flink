@@ -124,7 +124,6 @@ public class BatchExecNestedLoopJoin extends ExecNodeBase<RowData>
         this.singleRowJoin = singleRowJoin;
     }
 
-
     /**
      * This join as the inside of a device region, when both its sides are files.
      *
@@ -144,11 +143,11 @@ public class BatchExecNestedLoopJoin extends ExecNodeBase<RowData>
             return java.util.Optional.empty();
         }
         final java.util.Optional<org.apache.flink.table.accelerator.AccelScan> left =
-                org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode
-                        .deviceScanBeneath(getInputEdges().get(0).getSource());
+                org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode.deviceScanBeneath(
+                        getInputEdges().get(0).getSource());
         final java.util.Optional<org.apache.flink.table.accelerator.AccelScan> right =
-                org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode
-                        .deviceScanBeneath(getInputEdges().get(1).getSource());
+                org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode.deviceScanBeneath(
+                        getInputEdges().get(1).getSource());
         if (!left.isPresent() || !right.isPresent()) {
             return java.util.Optional.empty();
         }

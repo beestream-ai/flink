@@ -86,7 +86,8 @@ class AcceleratorCompiledPlanIT {
                         + " (id BIGINT NOT NULL, h DOUBLE NOT NULL) WITH ("
                         + "'connector' = 'values', 'sink-insert-only' = 'true')");
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED, true);
-        tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
+        tEnv.getConfig()
+                .set(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS, true);
     }
 
     @AfterEach

@@ -31,9 +31,9 @@ import java.util.Objects;
  * <p>{@link AccelInput} says "rows arrive, from somewhere that is Flink's business". That is the
  * right answer for every operator above the source and the wrong one for the source itself, where
  * <em>where the rows come from</em> is the entire question a provider is being asked. A subtree
- * rooted at an {@code AccelInput} can at best start work after Flink has decoded a file on the
- * CPU and handed the rows over one at a time; measured on 8M rows of 31 columns, that decode is
- * ~4.3 s and the handover another ~4.6 s, against ~57 ms of device execution.
+ * rooted at an {@code AccelInput} can at best start work after Flink has decoded a file on the CPU
+ * and handed the rows over one at a time; measured on 8M rows of 31 columns, that decode is ~4.3 s
+ * and the handover another ~4.6 s, against ~57 ms of device execution.
  *
  * <p>So this node exists to let a provider answer a different question: not "can I compute this
  * over rows you give me" but "can I read this file myself". What it carries is what that answer

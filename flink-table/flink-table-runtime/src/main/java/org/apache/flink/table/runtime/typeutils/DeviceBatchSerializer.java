@@ -31,8 +31,8 @@ import java.io.IOException;
 /**
  * The serializer for a record type that cannot be serialized, and says so.
  *
- * <p>A {@link DeviceBatch} is a set of handles into another processor's memory. It is meaningful
- * in the process that allocated it and nowhere else, so it can travel between two operators of one
+ * <p>A {@link DeviceBatch} is a set of handles into another processor's memory. It is meaningful in
+ * the process that allocated it and nowhere else, so it can travel between two operators of one
  * chain — where Flink passes records by reference — and across nothing else. Without this class
  * that limit still holds, but it is discovered as a Kryo failure deep inside a shuffle, naming a
  * field of a field and not the actual mistake.

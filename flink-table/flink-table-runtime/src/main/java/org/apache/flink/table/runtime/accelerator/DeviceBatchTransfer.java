@@ -46,9 +46,9 @@ public interface DeviceBatchTransfer {
      * reference into a buffer the next batch will reuse, which is the convention the rest of
      * Flink's operators already follow for {@code RowData}.
      *
-     * <p>Does not close the batch. Ownership is the caller's, which is the contract
-     * {@code DeviceBatch} states, and a transfer that closed its input would take it away from a
-     * caller that may still want the batch's metadata afterwards.
+     * <p>Does not close the batch. Ownership is the caller's, which is the contract {@code
+     * DeviceBatch} states, and a transfer that closed its input would take it away from a caller
+     * that may still want the batch's metadata afterwards.
      */
     void toHost(DeviceBatch batch, Consumer<RowData> out);
 
@@ -57,9 +57,9 @@ public interface DeviceBatchTransfer {
      *
      * <p>This is the expensive direction and the one M9 exists to avoid: measured at 17 ns a field
      * on the arrival path, which is ~4.6 s for 8M rows of 31 columns. It is here because a plan
-     * that offloads an operator whose input is not already on the device still has to get it
-     * there, and because a transition that only exists in one direction cannot be priced against
-     * one that exists in both.
+     * that offloads an operator whose input is not already on the device still has to get it there,
+     * and because a transition that only exists in one direction cannot be priced against one that
+     * exists in both.
      */
     DeviceBatch toDevice(List<RowData> rows, RowType rowType);
 

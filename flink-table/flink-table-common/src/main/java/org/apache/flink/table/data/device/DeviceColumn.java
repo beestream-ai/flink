@@ -30,9 +30,9 @@ import java.util.Optional;
  * One column of a {@link DeviceBatch}: its logical type, and an opaque handle to where its values
  * live on the device.
  *
- * <p>The type is Flink's, the values are the provider's. That split is the whole point — a
- * consumer can decide what to do with a column, and check that it is the column it expected,
- * without the values crossing the interconnect.
+ * <p>The type is Flink's, the values are the provider's. That split is the whole point — a consumer
+ * can decide what to do with a column, and check that it is the column it expected, without the
+ * values crossing the interconnect.
  */
 @PublicEvolving
 public final class DeviceColumn {

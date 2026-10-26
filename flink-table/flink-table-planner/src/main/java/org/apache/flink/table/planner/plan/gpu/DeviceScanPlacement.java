@@ -21,10 +21,10 @@ package org.apache.flink.table.planner.plan.gpu;
 /**
  * Whether reading a source on a device is worth it, given what reads the source.
  *
- * <p>The rule spark-rapids uses, in its terms: a device operator is declined when
- * {@code operatorGpuCost + transitionCost > operatorCpuCost}. A scan is where that rule bites
- * hardest, because a scan feeding a host consumer pays for the device read <em>and</em> the copy
- * back, and gets nothing the CPU read would not have given it.
+ * <p>The rule spark-rapids uses, in its terms: a device operator is declined when {@code
+ * operatorGpuCost + transitionCost > operatorCpuCost}. A scan is where that rule bites hardest,
+ * because a scan feeding a host consumer pays for the device read <em>and</em> the copy back, and
+ * gets nothing the CPU read would not have given it.
  *
  * <h2>The numbers, and where they come from</h2>
  *
@@ -34,8 +34,8 @@ package org.apache.flink.table.planner.plan.gpu;
  *   <li><b>CPU decode, 17.3 ns a field.</b> Reading all 31 columns took 6,539 ms against 2,447 ms
  *       for a {@code COUNT(*)} that projection pushdown answers without reading a column, so the
  *       decode is ~4.1 s over 8M x 31 fields.
- *   <li><b>Copy back, 11.3 ns a field.</b> The drain of an offloaded top-N, 2,905 ms over
- *       8M x 32 fields.
+ *   <li><b>Copy back, 11.3 ns a field.</b> The drain of an offloaded top-N, 2,905 ms over 8M x 32
+ *       fields.
  *   <li><b>Staging, 17.0 ns a field.</b> The arrival path, 4,594 ms over the same.
  * </ul>
  *
@@ -44,12 +44,12 @@ package org.apache.flink.table.planner.plan.gpu;
  * the <em>ceiling the device read would have to beat</em>, which is arithmetic on measured numbers
  * and does not require inventing the one figure nobody has.
  *
- * <p>For a host consumer the comparison is {@code deviceDecode + copyBack} against
- * {@code cpuDecode}: 11.3 of the 17.3 ns is spent before the device has decoded anything, so the
- * device would have to decode in under 6 ns a field to break even. For a consumer that takes the
- * batch as it is, the copy back is zero and the staging the consumer would otherwise have paid is
- * saved too, so the device read has 34.3 ns a field to work inside. The first is a bet on an
- * unmeasured number; the second does not need one.
+ * <p>For a host consumer the comparison is {@code deviceDecode + copyBack} against {@code
+ * cpuDecode}: 11.3 of the 17.3 ns is spent before the device has decoded anything, so the device
+ * would have to decode in under 6 ns a field to break even. For a consumer that takes the batch as
+ * it is, the copy back is zero and the staging the consumer would otherwise have paid is saved too,
+ * so the device read has 34.3 ns a field to work inside. The first is a bet on an unmeasured
+ * number; the second does not need one.
  */
 public final class DeviceScanPlacement {
 
@@ -65,8 +65,8 @@ public final class DeviceScanPlacement {
     /**
      * Measured: 101.3 ms for a resident cuDF read of 1M rows x 32 fields, §T27.
      *
-     * <p>The figure this class was first written without. Its absence was the reason a scan
-     * feeding a host consumer was declined, and its value is the reason that is no longer right.
+     * <p>The figure this class was first written without. Its absence was the reason a scan feeding
+     * a host consumer was declined, and its value is the reason that is no longer right.
      */
     static final double DEVICE_DECODE_NANOS_PER_FIELD = 3.17;
 
@@ -145,8 +145,8 @@ public final class DeviceScanPlacement {
     }
 
     /**
-     * How much a device read has to work inside when its consumer takes the batch as it is: the
-     * CPU decode it replaces, plus the staging the consumer no longer pays.
+     * How much a device read has to work inside when its consumer takes the batch as it is: the CPU
+     * decode it replaces, plus the staging the consumer no longer pays.
      */
     public static double budgetWhenResidentNanosPerField() {
         return CPU_DECODE_NANOS_PER_FIELD + STAGING_NANOS_PER_FIELD;

@@ -21,13 +21,13 @@ package org.apache.flink.table.planner.plan.accelerator;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
+import org.apache.flink.types.Row;
+import org.apache.flink.util.CloseableIterator;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.apache.flink.types.Row;
-import org.apache.flink.util.CloseableIterator;
 
 import java.nio.file.Path;
 
@@ -132,8 +132,7 @@ class AcceleratedScanIT {
                         + "'connector' = 'filesystem','path' = '"
                         + data.toUri()
                         + "','format' = 'testcsv')");
-        String baseline =
-                physicalPlanOf(off, "SELECT k, v * 2.0 AS d FROM parq");
+        String baseline = physicalPlanOf(off, "SELECT k, v * 2.0 AS d FROM parq");
 
         assertThat(offered).isEqualTo(baseline);
     }
@@ -157,8 +156,7 @@ class AcceleratedScanIT {
     @DisplayName("a declined source falls back to Flink's own reader and returns the same rows")
     void aDeclinedSourceReturnsTheSameRows() throws Exception {
         java.nio.file.Files.write(
-                data.resolve("part-0.csv"),
-                java.util.Arrays.asList("1,1.5", "2,2.5", "3,3.5"));
+                data.resolve("part-0.csv"), java.util.Arrays.asList("1,1.5", "2,2.5", "3,3.5"));
 
         fileSystemTable("parq", "testcsv");
         java.util.List<String> withAccelerator = collect(tEnv, "SELECT k, v FROM parq ORDER BY k");
@@ -171,7 +169,8 @@ class AcceleratedScanIT {
                         + "'connector' = 'filesystem','path' = '"
                         + data.toUri()
                         + "','format' = 'testcsv')");
-        java.util.List<String> withoutAccelerator = collect(off, "SELECT k, v FROM parq ORDER BY k");
+        java.util.List<String> withoutAccelerator =
+                collect(off, "SELECT k, v FROM parq ORDER BY k");
 
         assertThat(withAccelerator).isEqualTo(withoutAccelerator);
         assertThat(withAccelerator).containsExactly("1,1.5", "2,2.5", "3,3.5");

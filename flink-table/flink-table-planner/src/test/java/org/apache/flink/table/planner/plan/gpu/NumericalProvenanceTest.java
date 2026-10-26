@@ -158,8 +158,7 @@ class NumericalProvenanceTest {
 
         // Nothing is drifting on the way in, so this is the composability case: a chain of
         // projections each adding a little has to accumulate rather than reset at every node.
-        assertThat(NumericalProvenance.forwardDrift(projection, null, Set.of()))
-                .containsExactly(1);
+        assertThat(NumericalProvenance.forwardDrift(projection, null, Set.of())).containsExactly(1);
     }
 
     @Test
@@ -171,10 +170,7 @@ class NumericalProvenanceTest {
                 rex.makeCall(
                         SqlStdOperatorTable.GREATER_THAN,
                         dirty,
-                        rex.makeLiteral(
-                                java.math.BigDecimal.ONE,
-                                doubleType(),
-                                true));
+                        rex.makeLiteral(java.math.BigDecimal.ONE, doubleType(), true));
 
         // Null rather than an empty set: an empty set would say "nothing downstream drifts", and
         // the rows reaching downstream are already the wrong ones.

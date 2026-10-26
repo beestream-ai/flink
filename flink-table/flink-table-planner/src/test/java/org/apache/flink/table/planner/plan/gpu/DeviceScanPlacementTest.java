@@ -28,16 +28,15 @@ class DeviceScanPlacementTest {
     @Test
     void aScanNothingOffloadedReadsIsRefused() {
         RowCost cost =
-                DeviceScanPlacement.decide(
-                        "parquet", DeviceScanPlacement.Consumer.NONE_OFFLOADED);
+                DeviceScanPlacement.decide("parquet", DeviceScanPlacement.Consumer.NONE_OFFLOADED);
         assertThat(cost.isEligible()).isFalse();
         assertThat(cost.toString()).contains("nothing above it");
     }
 
     /**
-     * Was a refusal until the device decode rate was measured. 3.17 + 11.3 against 17.3 is a
-     * 1.19x margin — thin, and eaten by the row building rather than the read, which is the
-     * argument for residency rather than against reading on the device.
+     * Was a refusal until the device decode rate was measured. 3.17 + 11.3 against 17.3 is a 1.19x
+     * margin — thin, and eaten by the row building rather than the read, which is the argument for
+     * residency rather than against reading on the device.
      */
     @Test
     void aScanFeedingAnOffloadedOperatorWouldNowPayButHasNowhereToRun() {

@@ -34,15 +34,15 @@ import java.util.List;
 /**
  * Gathers host rows into device-resident batches, for an operator that reads them on a device.
  *
- * <p>The expensive direction, and the one M9 exists to make unnecessary: staging was measured at
- * 17 ns a field, which is ~4.6 s for 8M rows of 31 columns against ~57 ms of device execution. It
- * is here because a plan that offloads an operator whose input is not already on the device still
- * has to get it there, and because a transition that exists in only one direction cannot be priced
+ * <p>The expensive direction, and the one M9 exists to make unnecessary: staging was measured at 17
+ * ns a field, which is ~4.6 s for 8M rows of 31 columns against ~57 ms of device execution. It is
+ * here because a plan that offloads an operator whose input is not already on the device still has
+ * to get it there, and because a transition that exists in only one direction cannot be priced
  * against one that exists in both.
  *
  * <p>Rows are copied on arrival, not referenced. Flink reuses the {@code RowData} it hands an
- * operator, so holding one until the batch fills would hold whatever the next row overwrote it
- * with — a bug that shows up as a batch of identical rows.
+ * operator, so holding one until the batch fills would hold whatever the next row overwrote it with
+ * — a bug that shows up as a batch of identical rows.
  */
 public class RowToDeviceOperator extends AbstractStreamOperator<DeviceBatch>
         implements OneInputStreamOperator<RowData, DeviceBatch>, BoundedOneInput {

@@ -122,8 +122,7 @@ class DeviceTransitionOperatorTest {
     void rowsGoToTheDeviceInBatchesAndTheTailIsNotDropped() throws Exception {
         HostBackedTransfer transfer = new HostBackedTransfer();
         RowToDeviceOperator operator =
-                new RowToDeviceOperator(
-                        transfer, ROW, 2, DeviceTransitionOperatorTest::copy);
+                new RowToDeviceOperator(transfer, ROW, 2, DeviceTransitionOperatorTest::copy);
 
         List<DeviceBatch> emitted = new ArrayList<>();
         try (OneInputStreamOperatorTestHarness<RowData, DeviceBatch> harness =
@@ -139,7 +138,8 @@ class DeviceTransitionOperatorTest {
                             o ->
                                     emitted.add(
                                             ((org.apache.flink.streaming.runtime.streamrecord
-                                                                    .StreamRecord<DeviceBatch>)
+                                                                            .StreamRecord<
+                                                                    DeviceBatch>)
                                                             o)
                                                     .getValue()));
         }
@@ -157,8 +157,7 @@ class DeviceTransitionOperatorTest {
     void arrivingRowsAreCopiedNotReferenced() throws Exception {
         HostBackedTransfer transfer = new HostBackedTransfer();
         RowToDeviceOperator operator =
-                new RowToDeviceOperator(
-                        transfer, ROW, 3, DeviceTransitionOperatorTest::copy);
+                new RowToDeviceOperator(transfer, ROW, 3, DeviceTransitionOperatorTest::copy);
 
         GenericRowData reused = new GenericRowData(2);
         try (OneInputStreamOperatorTestHarness<RowData, DeviceBatch> harness =
@@ -181,8 +180,7 @@ class DeviceTransitionOperatorTest {
     void aBatchComesBackAsRowsInOrderAndIsThenReleased() throws Exception {
         HostBackedTransfer transfer = new HostBackedTransfer();
         DeviceBatch batch =
-                transfer.toDevice(
-                        Arrays.asList(row(7, 7.5), row(8, 8.5), row(9, 9.5)), ROW);
+                transfer.toDevice(Arrays.asList(row(7, 7.5), row(8, 8.5), row(9, 9.5)), ROW);
 
         List<String> seen = new ArrayList<>();
         DeviceToRowOperator operator = new DeviceToRowOperator(transfer);
@@ -196,7 +194,8 @@ class DeviceTransitionOperatorTest {
                             o -> {
                                 RowData r =
                                         ((org.apache.flink.streaming.runtime.streamrecord
-                                                                .StreamRecord<RowData>)
+                                                                        .StreamRecord<
+                                                                RowData>)
                                                         o)
                                                 .getValue();
                                 seen.add(r.getInt(0) + ":" + r.getDouble(1));
@@ -275,9 +274,9 @@ class DeviceTransitionOperatorTest {
     }
 
     /**
-     * M9.11. A masked column read as dense returns the padding wherever a value was null, and a
-     * row count of the right length agrees with it. So it is refused, and the refusal names the
-     * column and the fix.
+     * M9.11. A masked column read as dense returns the padding wherever a value was null, and a row
+     * count of the right length agrees with it. So it is refused, and the refusal names the column
+     * and the fix.
      */
     @Test
     void aMaskedColumnIsRefusedByATransferThatDoesNotReadMasks() throws Exception {
@@ -287,8 +286,7 @@ class DeviceTransitionOperatorTest {
         DeviceBatch masked =
                 new DeviceBatch(
                         RowType.of(new DoubleType(true)),
-                        Arrays.asList(
-                                new DeviceColumn(new DoubleType(true), values, validity)),
+                        Arrays.asList(new DeviceColumn(new DoubleType(true), values, validity)),
                         1);
 
         assertThat(transfer.supportsNulls()).as("the default contract is dense").isFalse();
@@ -322,8 +320,7 @@ class DeviceTransitionOperatorTest {
         DeviceBatch masked =
                 new DeviceBatch(
                         RowType.of(new DoubleType(true)),
-                        Arrays.asList(
-                                new DeviceColumn(new DoubleType(true), values, validity)),
+                        Arrays.asList(new DeviceColumn(new DoubleType(true), values, validity)),
                         1);
 
         List<String> seen = new ArrayList<>();
@@ -380,8 +377,9 @@ class DeviceTransitionOperatorTest {
                                     seen.add(
                                             String.valueOf(
                                                     ((org.apache.flink.streaming.runtime
-                                                                            .streamrecord
-                                                                            .StreamRecord<RowData>)
+                                                                                    .streamrecord
+                                                                                    .StreamRecord<
+                                                                            RowData>)
                                                                     o)
                                                             .getValue()
                                                             .getInt(0))));
