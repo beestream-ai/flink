@@ -257,6 +257,19 @@ public class BatchExecSortLimit extends ExecNodeBase<RowData>
         if (config.isCompiled() || limitStart != 0L) {
             return java.util.Optional.empty();
         }
+        if (isGlobal) {
+            // The substitution below returns the provider's source in place of this whole node,
+            // so the SortLimitOperator is never built and no sort and no limit remain above the
+            // read. The provider's source applies the limit per split, which is what the local
+            // half of a two-phase sort-limit is allowed to do because the global half trims
+            // afterwards. A global node has nothing above it, so the same substitution would
+            // answer ORDER BY k LIMIT 10 over four part files with up to forty rows in file
+            // order. Ordinarily a global node sits above an Exchange, whose deviceScan() is
+            // empty, and this never arises -- but SINGLETON is already satisfied at source
+            // parallelism 1, where no Exchange is inserted and the global node sits directly on
+            // the scan. That is the configuration the benchmarks here run in.
+            return java.util.Optional.empty();
+        }
         if (!config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED)) {
             return java.util.Optional.empty();
         }

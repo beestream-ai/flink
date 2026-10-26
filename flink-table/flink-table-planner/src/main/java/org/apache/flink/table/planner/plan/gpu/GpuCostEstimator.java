@@ -314,10 +314,14 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
         }
         switch (from) {
             case INTEGER:
-                return to == SqlTypeName.BIGINT
-                        || to == SqlTypeName.DOUBLE
-                        || to == SqlTypeName.FLOAT
-                        || to == SqlTypeName.REAL;
+                // Not FLOAT or REAL. A float holds 24 bits of mantissa, so it does not hold an
+                // int past 2^24 -- and the kernel would not narrow it in any case: an INT column
+                // is staged as an IntArray and read into a double local, and CAST renders as a
+                // no-op there because every value is already a double. So Flink computes
+                // (float) 16777217 == 1.6777216E7 and the device computes 1.6777217E7, which is
+                // a different answer to the same query rather than a less precise one. BIGINT to
+                // DOUBLE stays admitted for the opposite reason: both sides narrow identically.
+                return to == SqlTypeName.BIGINT || to == SqlTypeName.DOUBLE;
             case BIGINT:
                 return to == SqlTypeName.DOUBLE;
             case FLOAT:

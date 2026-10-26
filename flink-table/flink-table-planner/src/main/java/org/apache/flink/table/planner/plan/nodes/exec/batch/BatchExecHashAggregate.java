@@ -293,14 +293,22 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
      * input row per subtask to work with; there is nothing for a device to do. Everything else
      * reads rows and contracts them.
      *
-     * <p>{@code isFinal} is deliberately <em>not</em> tested. Excluding it looks right, since the
-     * final half of a two-phase aggregate is the merge, but the two flags are independent: a
-     * one-phase aggregate reads rows and is also final, and refusing it would give up the whole
-     * shape for no reason. {@code isMerge} already excludes the case that matters.
+     * <p>{@code isFinal} is tested only where there is a grouping key, and that asymmetry is the
+     * point. For an ungrouped contraction the flags really are independent: a one-phase aggregate
+     * reads rows and is also final, and refusing it would give up the whole shape for no reason.
+     * With a key it is different, because of what the device operator does rather than what it
+     * computes: it emits one row per group per batch, carrying partial sums, and that is exactly
+     * what a partial aggregate is allowed to do and exactly what a final one is not. A one-phase
+     * grouped aggregate -- agg-phase-strategy ONE_PHASE, or an input already hash-distributed on
+     * the key -- has nothing above it to merge those partials, so every key would be emitted once
+     * per batch and the query would answer with rows Flink never produces.
+     *
+     * <p>{@link #tryDeviceRegion} has refused this since it was written, for the same reason in the
+     * same words; this gate simply did not. The two are now consistent.
      */
     @Override
     public boolean supportGpuOffload() {
-        return !isMerge;
+        return !isMerge && !(grouping.length > 0 && isFinal);
     }
 
     /**
