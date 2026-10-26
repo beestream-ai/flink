@@ -193,21 +193,18 @@ public class BatchExecTableSourceScan extends CommonExecTableSourceScan
      * place to keep it in step — {@link org.apache.flink.table.accelerator.AccelScan} exists so
      * that a provider declines on the string.
      *
-     * <p>Note what this does <em>not</em> do: it does not make the scan offloadable.
-     * {@link #supportGpuOffload()} stays false, so the scan does not join the grouping that
-     * decides which operators share a device, and every plan is the plan it was before. This
-     * answers "could a provider read this", so the answer can be recorded and reported; acting on
-     * it needs an operator that can consume a device-resident batch.
+     * <p>Note what this does <em>not</em> do: it does not make the scan offloadable. {@link
+     * #supportGpuOffload()} stays false, so the scan does not join the grouping that decides which
+     * operators share a device, and every plan is the plan it was before. This answers "could a
+     * provider read this", so the answer can be recorded and reported; acting on it needs an
+     * operator that can consume a device-resident batch.
      */
     @Override
     public java.util.Optional<org.apache.flink.table.accelerator.AccelScan> deviceScan() {
         final java.util.Map<String, String> options;
         try {
             options =
-                    getTableSourceSpec()
-                            .getContextResolvedTable()
-                            .getResolvedTable()
-                            .getOptions();
+                    getTableSourceSpec().getContextResolvedTable().getResolvedTable().getOptions();
         } catch (RuntimeException notResolvable) {
             // An inline or otherwise unresolved table. Unknown means "no scan to offer", which is
             // the direction this has to fail in.
@@ -233,20 +230,29 @@ public class BatchExecTableSourceScan extends CommonExecTableSourceScan
         // data. SELECT lat, lon over (id, lat, lon) would read id and lat.
         final int[] projected = new int[produced.getFieldCount()];
         org.apache.flink.table.planner.plan.abilities.source.ProjectPushDownSpec pushDown = null;
-        final java.util.List<
-                        org.apache.flink.table.planner.plan.abilities.source.SourceAbilitySpec>
+        final java.util.List<org.apache.flink.table.planner.plan.abilities.source.SourceAbilitySpec>
                 abilities = getTableSourceSpec().getSourceAbilities();
         if (abilities != null) {
             for (org.apache.flink.table.planner.plan.abilities.source.SourceAbilitySpec ability :
                     abilities) {
                 if (ability
                         instanceof
-                        org.apache.flink.table.planner.plan.abilities.source
-                                .ProjectPushDownSpec) {
+                        org.apache.flink.table.planner.plan.abilities.source.ProjectPushDownSpec) {
                     pushDown =
                             (org.apache.flink.table.planner.plan.abilities.source
                                             .ProjectPushDownSpec)
                                     ability;
+                } else {
+                    // Any other ability has already changed what the CPU source would read,
+                    // and the device source built from this replaces that source outright.
+                    // Partition pushdown is the one that bites: the rule removes the partition
+                    // predicate from the plan once it is pushed, so a scan described by path
+                    // and column indexes alone reads every partition and the query returns a
+                    // sum over the whole table -- the columns exist, the types line up, and
+                    // the number is a real sum of the wrong rows. A pushed LIMIT and a
+                    // metadata column are the same shape. Declining is the only safe answer
+                    // until the IR can carry them.
+                    return java.util.Optional.empty();
                 }
             }
         }
@@ -270,9 +276,6 @@ public class BatchExecTableSourceScan extends CommonExecTableSourceScan
         }
         return java.util.Optional.of(
                 new org.apache.flink.table.accelerator.AccelScan(
-                        format,
-                        java.util.Collections.singletonList(path),
-                        projected,
-                        produced));
+                        format, java.util.Collections.singletonList(path), projected, produced));
     }
 }
