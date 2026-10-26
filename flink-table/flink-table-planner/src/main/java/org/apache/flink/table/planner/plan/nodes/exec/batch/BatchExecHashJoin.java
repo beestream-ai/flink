@@ -23,6 +23,7 @@ import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
@@ -313,8 +314,10 @@ public class BatchExecHashJoin extends ExecNodeBase<RowData>
         RowType rightType = (RowType) getInputEdges().get(1).getOutputType();
         RowType buildType = leftIsBuild ? leftType : rightType;
         RowType probeType = leftIsBuild ? rightType : leftType;
-        long buildRows = Math.max(0L, leftIsBuild ? estimatedLeftRowCount : estimatedRightRowCount);
-        long probeRows = Math.max(0L, leftIsBuild ? estimatedRightRowCount : estimatedLeftRowCount);
+        long buildRows =
+                knownOrUnknown(leftIsBuild ? estimatedLeftRowCount : estimatedRightRowCount);
+        long probeRows =
+                knownOrUnknown(leftIsBuild ? estimatedRightRowCount : estimatedLeftRowCount);
         return GpuJoinSupport.estimate(
                 joinSpec,
                 buildType,
@@ -324,6 +327,19 @@ public class BatchExecHashJoin extends ExecNodeBase<RowData>
                 isBroadcast,
                 buildRows,
                 probeRows);
+    }
+
+    /**
+     * A row count as the cost model spells it, where a missing estimate is its own value.
+     *
+     * <p>{@code getEstimatedRowCount} answers {@code -1} when the planner captured no estimate.
+     * Clamping that to zero would say "no rows" instead of "no estimate", and {@code
+     * AcceleratorChoice.repaysFixedCost} reads the two oppositely: an unknown count skips the
+     * fixed-cost comparison, while a zero fails it for any provider whose setup costs anything,
+     * declining the join on a number nobody measured.
+     */
+    private static long knownOrUnknown(long rows) {
+        return rows < 0 ? AccelWorkProfile.UNKNOWN_ROWS : rows;
     }
 
     @Override

@@ -20,15 +20,14 @@ package org.apache.flink.table.planner.plan.nodes.exec.processor;
 
 import org.apache.flink.table.api.TableConfig;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
+import org.apache.flink.table.planner.plan.gpu.DeviceScanPlacement;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
 import org.apache.flink.table.planner.plan.gpu.GpuOffloadDecision;
 import org.apache.flink.table.planner.plan.gpu.NumericalProvenance;
-import org.apache.flink.table.planner.plan.gpu.DeviceScanPlacement;
 import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeGraph;
-import org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecAcceleratedGroup;
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecAcceleratedSort;
@@ -349,38 +348,13 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
     }
 
     /**
-     * Rows the subtree will see, taken as the largest estimate among its members.
-     *
-     * <p>Members of one group run as a single kernel over the same batches, and a filter can only
-     * narrow what follows it, so the widest member is what the kernel is actually sized against.
-     * Unknown wins over any number: a group holding one node the planner could not estimate is a
-     * group whose total work is not known, and guessing there would be worse than skipping the
-     * gate.
-     */
-    private static double rowCountOf(List<ExecNode<?>> members) {
-        double widest = 0.0;
-        for (ExecNode<?> member : members) {
-            double rows = rowCountOf(member);
-            if (rows == GpuOffloadExecNode.UNKNOWN_ROW_COUNT) {
-                return GpuOffloadExecNode.UNKNOWN_ROW_COUNT;
-            }
-            widest = Math.max(widest, rows);
-        }
-        return widest;
-    }
-
-    private static double rowCountOf(ExecNode<?> node) {
-        return node.getEstimatedRowCount();
-    }
-
-    /**
      * Marks a group's work as needing the CPU's floating-point rounding, where the difference could
      * be observed.
      *
      * <p>An accelerator may evaluate {@code a * b + c} as one fused operation with a single
      * rounding. That is a more accurate answer than Flink's two roundings and a <em>different</em>
-     * one, and unlike a transcendental it cannot be spotted by looking for a function name:
-     * {@code -}, {@code *} and {@code +} are each exact under IEEE 754, and it is their
+     * one, and unlike a transcendental it cannot be spotted by looking for a function name: {@code
+     * -}, {@code *} and {@code +} are each exact under IEEE 754, and it is their
      * <em>composition</em> that a device is free to round differently. Measured on this project on
      * a query containing no transcendental at all, the CPU returned 24 rows and the device 23.
      *
@@ -394,9 +368,9 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
      * answers this one unchanged: a {@code Calc} with a condition, a grouped aggregate and anything
      * it does not recognise — a sort, a join, a limit, a rank — are all not value-only.
      *
-     * <p>Two reasons to require it, and the first is not about reach at all. When
-     * {@code approximate-projections} is off — the default — the deployment has asked for values
-     * that match Flink's, and a fused multiply-add does not match them whether or not anything
+     * <p>Two reasons to require it, and the first is not about reach at all. When {@code
+     * approximate-projections} is off — the default — the deployment has asked for values that
+     * match Flink's, and a fused multiply-add does not match them whether or not anything
      * downstream looks. When it is on, value drift is accepted and only membership is left to
      * protect, which is the reach question below.
      *
@@ -494,11 +468,11 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
      * <p>Separate from the operator pass and deliberately without a group. A scan that joined the
      * grouping would be placed on a device alongside the operator above it, and the operator above
      * it reads {@code RowData} — so the rows would come off the device one at a time, which is the
-     * cost the whole exercise exists to remove, paid to no purpose. Until an operator can consume
-     * a device-resident batch, the honest verdict for every scan is a decline, and what this pass
+     * cost the whole exercise exists to remove, paid to no purpose. Until an operator can consume a
+     * device-resident batch, the honest verdict for every scan is a decline, and what this pass
      * buys is that the decline is <em>visible</em>: EXPLAIN was previously silent about sources
-     * altogether, so a reader could not tell an unsupported format from a supported one nothing
-     * had asked about.
+     * altogether, so a reader could not tell an unsupported format from a supported one nothing had
+     * asked about.
      *
      * <p>A source that offers no scan at all — a different connector, an unreadable format — is
      * left without an assignment, exactly as before, so EXPLAIN says nothing about it and no plan
@@ -525,9 +499,7 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
                 LOG.info("Accelerator will read the source: {}", node.getDescription());
             } else {
                 LOG.info(
-                        "Source read on the CPU: {} — {}",
-                        node.getDescription(),
-                        verdict.reason());
+                        "Source read on the CPU: {} — {}", node.getDescription(), verdict.reason());
             }
             assign(node, new GpuOffloadAssignment(NO_GROUP, verdict));
         }
@@ -536,9 +508,9 @@ public class GpuOffloadProcessor implements ExecNodeGraphProcessor {
     /**
      * What reads this scan, in the only three kinds that change the answer.
      *
-     * <p>A scan with several consumers takes the best of them: if any consumer can use the batch
-     * as it is, the read pays for itself there and the others are served by a transition they
-     * would have paid for anyway.
+     * <p>A scan with several consumers takes the best of them: if any consumer can use the batch as
+     * it is, the read pays for itself there and the others are served by a transition they would
+     * have paid for anyway.
      */
     private static DeviceScanPlacement.Consumer consumerKind(
             ExecNode<?> scan, Map<ExecNode<?>, List<ExecNode<?>>> consumers) {

@@ -31,21 +31,21 @@ import java.util.Objects;
  *
  * <p>What travels between an offloaded source and the operator above it. Today that operator
  * receives {@code RowData}, so the source decodes Parquet on the CPU and the operator stages every
- * field back into a device array: measured at ~4.3 s of decode and ~4.6 s of staging against
- * ~57 ms of device execution, for 8M rows of 31 columns. This type is how those two stages stop
- * happening — the rows are produced where they are used and never take the round trip.
+ * field back into a device array: measured at ~4.3 s of decode and ~4.6 s of staging against ~57 ms
+ * of device execution, for 8M rows of 31 columns. This type is how those two stages stop happening
+ * — the rows are produced where they are used and never take the round trip.
  *
  * <h2>What it does not offer</h2>
  *
  * <p>No accessor returns a value, a row, or anything derived from the data. Flink could only
- * implement one by copying the column back, which would reintroduce exactly the cost this exists
- * to remove, and it would do so invisibly at whatever call site happened to ask. A consumer that
- * needs values on the host asks for the transition operator instead, which states the cost.
+ * implement one by copying the column back, which would reintroduce exactly the cost this exists to
+ * remove, and it would do so invisibly at whatever call site happened to ask. A consumer that needs
+ * values on the host asks for the transition operator instead, which states the cost.
  *
- * <p>It is deliberately <b>not</b> {@code Serializable}. A device pointer is meaningless in
- * another process and usually in another thread, so a batch cannot travel in a JobGraph or through
- * a shuffle. Implementing the interface would let a caller try, and fail somewhere far away from
- * the mistake.
+ * <p>It is deliberately <b>not</b> {@code Serializable}. A device pointer is meaningless in another
+ * process and usually in another thread, so a batch cannot travel in a JobGraph or through a
+ * shuffle. Implementing the interface would let a caller try, and fail somewhere far away from the
+ * mistake.
  *
  * <h2>Ownership</h2>
  *
@@ -114,8 +114,18 @@ public final class DeviceBatch implements AutoCloseable {
         return closed;
     }
 
-    /** Total device memory the batch occupies, across every column and mask. */
+    /**
+     * Total device memory the batch occupies, across every column and mask.
+     *
+     * <p>Refuses once closed, as {@link #column(int)} does. The buffers are released by then, so
+     * reading their sizes would dereference freed device handles -- undefined behaviour in the
+     * provider rather than a diagnosable error here. A metrics path that reports batch size wants
+     * the exception, not a number read from freed memory.
+     */
     public long sizeInBytes() {
+        if (closed) {
+            throw new IllegalStateException("batch is closed");
+        }
         long total = 0;
         for (DeviceColumn column : columns) {
             total += column.values().sizeInBytes();
@@ -127,8 +137,8 @@ public final class DeviceBatch implements AutoCloseable {
     /**
      * Releases every buffer this batch owns.
      *
-     * <p>Idempotent: a second call does nothing rather than freeing twice. Every buffer is
-     * released even if one of them throws, and the first failure is what the caller sees.
+     * <p>Idempotent: a second call does nothing rather than freeing twice. Every buffer is released
+     * even if one of them throws, and the first failure is what the caller sees.
      */
     @Override
     public void close() {

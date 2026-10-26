@@ -22,10 +22,18 @@ import org.apache.flink.FlinkVersion;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
+import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
+import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.api.TableException;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.planner.codegen.sort.ComparatorCodeGenerator;
 import org.apache.flink.table.planner.delegation.PlannerBase;
+import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
+import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
+import org.apache.flink.table.planner.plan.gpu.GpuSortSupport;
+import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
@@ -35,17 +43,10 @@ import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTranslator;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
-import org.apache.flink.table.runtime.generated.GeneratedRecordComparator;
-import org.apache.flink.table.runtime.operators.sort.SortLimitOperator;
-import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
-import org.apache.flink.table.accelerator.AccelNode;
-import org.apache.flink.table.api.config.ExecutionConfigOptions;
-import org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder;
-import org.apache.flink.table.planner.plan.gpu.GpuOffloadAssignment;
-import org.apache.flink.table.planner.plan.gpu.GpuSortSupport;
-import org.apache.flink.table.planner.plan.gpu.RowCost;
 import org.apache.flink.table.runtime.accelerator.AcceleratedCalcSpec;
+import org.apache.flink.table.runtime.generated.GeneratedRecordComparator;
 import org.apache.flink.table.runtime.gpu.GpuOrCpuCalcOperatorFactory;
+import org.apache.flink.table.runtime.operators.sort.SortLimitOperator;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -53,8 +54,8 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCre
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.Collections;
-import java.util.Optional;
 import java.util.List;
+import java.util.Optional;
 
 import static org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecLimit.FIELD_NAME_IS_GLOBAL;
 import static org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecLimit.FIELD_NAME_LIMIT_END;
@@ -214,7 +215,10 @@ public class BatchExecSortLimit extends ExecNodeBase<RowData>
                         (RowType) getOutputType(),
                         config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE),
                         config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
-        return new GpuOrCpuCalcOperatorFactory(spec, onCpu);
+        return new GpuOrCpuCalcOperatorFactory(
+                spec,
+                onCpu,
+                config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MAX_PARALLELISM));
     }
 
     /**
@@ -233,18 +237,18 @@ public class BatchExecSortLimit extends ExecNodeBase<RowData>
     public RowCost estimateRowCost() {
         RowType inputType = (RowType) getInputEdges().get(0).getOutputType();
         double rows = getEstimatedRowCount();
-        long estimated = rows <= 0 ? 0L : (long) rows;
+        long estimated = rows <= 0 ? AccelWorkProfile.UNKNOWN_ROWS : (long) rows;
         return GpuSortSupport.estimate(sortSpec, inputType, estimated);
     }
 
     /**
      * The provider's own source for a top-N directly over a readable file source, or empty.
      *
-     * <p>Kept narrow on purpose. The pattern is a bounded sort whose only input is a
-     * {@code TableSourceScan} offering an {@link org.apache.flink.table.accelerator.AccelScan};
-     * anything between them -- a projection, a filter, an exchange -- and this declines, because
-     * the IR handed to the provider would then describe less than the plan does and the source
-     * would return rows the query did not ask for.
+     * <p>Kept narrow on purpose. The pattern is a bounded sort whose only input is a {@code
+     * TableSourceScan} offering an {@link org.apache.flink.table.accelerator.AccelScan}; anything
+     * between them -- a projection, a filter, an exchange -- and this declines, because the IR
+     * handed to the provider would then describe less than the plan does and the source would
+     * return rows the query did not ask for.
      *
      * <p>Declining is always safe: the normal path below builds exactly the plan it built before.
      */
@@ -272,7 +276,10 @@ public class BatchExecSortLimit extends ExecNodeBase<RowData>
         final java.util.Optional<org.apache.flink.api.connector.source.Source<RowData, ?, ?>>
                 source =
                         org.apache.flink.table.runtime.accelerator.AcceleratorProviders
-                                .createScanSource(subtree.get(), inputType);
+                                .createScanSource(
+                                        subtree.get(),
+                                        inputType,
+                                        planner.getFlinkContext().getClassLoader());
         if (!source.isPresent()) {
             return java.util.Optional.empty();
         }

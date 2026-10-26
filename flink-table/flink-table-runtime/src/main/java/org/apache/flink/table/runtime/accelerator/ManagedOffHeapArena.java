@@ -61,6 +61,15 @@ import java.util.List;
 @Internal
 public final class ManagedOffHeapArena implements Closeable {
 
+    /**
+     * How much is zeroed per bulk write.
+     *
+     * <p>A scratch array rather than one the size of the arena: the point is to leave the per-byte
+     * loop, not to allocate a second buffer as large as the first. At this size the copy runs at
+     * memory bandwidth and the array is small enough to stay in cache.
+     */
+    private static final int ZEROING_CHUNK_BYTES = 64 * 1024;
+
     private final MemoryManager memoryManager;
     private final Object owner;
     private final long reserved;
@@ -132,8 +141,15 @@ public final class ManagedOffHeapArena implements Closeable {
         ByteBuffer buffer = segment.getOffHeapBuffer();
         // Unsafe memory is not zeroed on allocation, and a provider is entitled to assume the
         // buffer it is handed holds nothing. The tail of a partial batch is the case that cares.
-        for (int i = 0; i < bytes; i++) {
-            segment.put(i, (byte) 0);
+        //
+        // In chunks rather than a byte at a time: this runs over the slot's whole operator
+        // share of managed memory, which is routinely hundreds of megabytes, and it sits on
+        // the path that builds the operator. A per-byte loop costs roughly a nanosecond a
+        // byte -- half a second for a 512 MiB arena -- charged against a feature whose point
+        // is latency.
+        final byte[] zeros = new byte[Math.min(bytes, ZEROING_CHUNK_BYTES)];
+        for (int offset = 0; offset < bytes; offset += zeros.length) {
+            segment.put(offset, zeros, 0, Math.min(zeros.length, bytes - offset));
         }
         return buffer;
     }

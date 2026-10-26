@@ -86,21 +86,29 @@ public final class AcceleratorProviders {
      *
      * <p>Asked on the JobManager while planning, unlike everything else here, because a source has
      * to be in the job graph before anything runs. A provider that answers is claiming the
-     * capability for the TaskManagers too; see
-     * {@link AcceleratorProvider#createScanSource}.
+     * capability for the TaskManagers too; see {@link AcceleratorProvider#createScanSource}.
+     *
+     * <p>The loader is the caller's to supply, and it has to be the user-code one. This class ships
+     * in {@code flink-table-runtime}, which lives in {@code lib/} and is loaded by the app
+     * classloader; that loader cannot see a job's submitted jar. Resolving against it would make a
+     * provider packaged with the job invisible to the only plan-time lookup there is, while the
+     * identical provider is still found at runtime by {@link #find} -- so the scan substitution
+     * would simply never fire, with nothing in the plan to say why.
      */
-    public static java.util.Optional<org.apache.flink.api.connector.source.Source<
-                    org.apache.flink.table.data.RowData, ?, ?>>
+    public static java.util.Optional<
+                    org.apache.flink.api.connector.source.Source<
+                            org.apache.flink.table.data.RowData, ?, ?>>
             createScanSource(
                     org.apache.flink.table.accelerator.AccelNode subtree,
-                    org.apache.flink.table.types.logical.RowType outputType) {
-        final Optional<AcceleratorProvider> found =
-                find(AcceleratorProviders.class.getClassLoader());
+                    org.apache.flink.table.types.logical.RowType outputType,
+                    ClassLoader loader) {
+        final Optional<AcceleratorProvider> found = find(loader);
         if (found.isPresent()) {
             final AcceleratorProvider provider = found.get();
             try {
-                final java.util.Optional<org.apache.flink.api.connector.source.Source<
-                                org.apache.flink.table.data.RowData, ?, ?>>
+                final java.util.Optional<
+                                org.apache.flink.api.connector.source.Source<
+                                        org.apache.flink.table.data.RowData, ?, ?>>
                         source = provider.createScanSource(subtree, outputType);
                 if (source.isPresent()) {
                     return source;

@@ -389,8 +389,7 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
      * <p>Conservative by construction: only the functions listed here are treated as exact, so a
      * function added to the IR later is covered by the gate until someone decides otherwise.
      */
-    private static boolean mayRoundDifferently(
-            org.apache.flink.table.accelerator.AccelNode node) {
+    private static boolean mayRoundDifferently(org.apache.flink.table.accelerator.AccelNode node) {
         if (node instanceof org.apache.flink.table.accelerator.AccelProject) {
             for (org.apache.flink.table.accelerator.AccelExpression expression :
                     ((org.apache.flink.table.accelerator.AccelProject) node).projections()) {
@@ -471,8 +470,7 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         }
         final org.apache.flink.table.planner.plan.nodes.exec.ExecNode<?> input =
                 inputEdge.getSource();
-        if (!(input
-                instanceof org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode)) {
+        if (!(input instanceof org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode)) {
             return java.util.Optional.empty();
         }
         final org.apache.flink.table.planner.plan.nodes.exec.GpuOffloadExecNode offloadable =
@@ -497,14 +495,19 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
                 && mayRoundDifferently(region.get())
                 && !config.get(
                         ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_APPROXIMATE_PROJECTIONS)) {
-            LOG.debug("device region declined: it computes values and approximate-projections is off");
+            LOG.debug(
+                    "device region declined: it computes values and approximate-projections is off");
             return java.util.Optional.empty();
         }
         final RowType inputType = (RowType) inputEdge.getOutputType();
         final java.util.Optional<org.apache.flink.table.accelerator.AccelNode> subtree =
-                org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder.buildAggregateOverScan(
-                        grouping, java.util.Arrays.asList(aggCalls), region.get(), inputType,
-                        (RowType) getOutputType());
+                org.apache.flink.table.planner.plan.accelerator.AccelIrBuilder
+                        .buildAggregateOverScan(
+                                grouping,
+                                java.util.Arrays.asList(aggCalls),
+                                region.get(),
+                                inputType,
+                                (RowType) getOutputType());
         if (!subtree.isPresent()) {
             LOG.debug(
                     "the aggregate over the region is not expressible: {} keys, {} calls",
@@ -515,7 +518,10 @@ public class BatchExecHashAggregate extends ExecNodeBase<RowData>
         final java.util.Optional<org.apache.flink.api.connector.source.Source<RowData, ?, ?>>
                 source =
                         org.apache.flink.table.runtime.accelerator.AcceleratorProviders
-                                .createScanSource(subtree.get(), (RowType) getOutputType());
+                                .createScanSource(
+                                        subtree.get(),
+                                        (RowType) getOutputType(),
+                                        planner.getFlinkContext().getClassLoader());
         if (!source.isPresent()) {
             LOG.debug("no provider claimed the region rooted at {}", region.get().getClass());
             return java.util.Optional.empty();

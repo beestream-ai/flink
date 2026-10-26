@@ -83,6 +83,20 @@ public final class FallbackToCpuTwoInputOperator
     private final @Nullable Closeable staging;
 
     private TwoInputStreamOperator<RowData, RowData, RowData> delegate;
+
+    /**
+     * The initializer the task gave this wrapper, kept for an operator substituted later.
+     *
+     * <p>{@code StreamTask} calls {@code initializeState} once, before {@code open()}, and it
+     * reaches whichever operator is the delegate at that moment -- the accelerated one. The
+     * generated operator that replaces it on fallback is built afterwards, so without this it would
+     * run having never been initialised: {@code stateHandler} and {@code timeServiceManager} null,
+     * {@code snapshotState} dereferencing the first of them, and any delegate that touches state or
+     * timers in {@code open()} failing there. That turns the guard meant to rescue the task into a
+     * second way to lose it.
+     */
+    private @Nullable StreamTaskStateInitializer stateInitializer;
+
     private boolean accelerated = true;
 
     /** Which of the two safe fallback points was taken, or {@code ACCELERATED} if neither. */
@@ -213,6 +227,11 @@ public final class FallbackToCpuTwoInputOperator
         }
         releaseStaging();
         delegate = cpu.get();
+        if (stateInitializer != null) {
+            // The replacement is built after the task's one call to initializeState, so
+            // it is initialised here or not at all.
+            delegate.initializeState(stateInitializer);
+        }
         accelerated = false;
     }
 
@@ -331,6 +350,7 @@ public final class FallbackToCpuTwoInputOperator
 
     @Override
     public void initializeState(StreamTaskStateInitializer initializer) throws Exception {
+        this.stateInitializer = initializer;
         delegate.initializeState(initializer);
     }
 

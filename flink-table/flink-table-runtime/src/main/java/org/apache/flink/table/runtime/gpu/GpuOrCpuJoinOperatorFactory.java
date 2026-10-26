@@ -93,6 +93,7 @@ public class GpuOrCpuJoinOperatorFactory extends AbstractStreamOperatorFactory<R
     @Override
     public <T extends StreamOperator<RowData>> T createStreamOperator(
             StreamOperatorParameters<RowData> parameters) {
+        ManagedOffHeapArena staging = null;
         try {
             String retry = GpuOrCpuCalcOperatorFactory.retryAttempt(parameters);
             if (retry != null) {
@@ -116,7 +117,7 @@ public class GpuOrCpuJoinOperatorFactory extends AbstractStreamOperatorFactory<R
             if (!outcome.accelerated()) {
                 return codeGenerated(parameters, outcome.code(), outcome.reason());
             }
-            ManagedOffHeapArena staging = AcceleratorSetup.reserveStaging(spec, parameters);
+            staging = AcceleratorSetup.reserveStaging(spec, parameters);
             StreamOperatorFactory<RowData> built =
                     accelerator
                             .get()
@@ -155,10 +156,35 @@ public class GpuOrCpuJoinOperatorFactory extends AbstractStreamOperatorFactory<R
             T operator = (T) guarded;
             return report(operator, guarded, outcome.code(), outcome.reason());
         } catch (Throwable t) {
+            // The staging arena holds the slot's whole operator share of managed memory, and
+            // the generated operator this falls back to wants managed memory of its own. On
+            // this path nothing has taken ownership of it -- the guard that would give it back
+            // is never returned -- so without this the fallback asks the MemoryManager for a
+            // share that is still booked and fails the task instead of running on the CPU.
+            releaseStaging(staging);
             return codeGenerated(
                     parameters,
                     AcceleratorDeclineReason.OPERATOR_CREATION_FAILED,
                     "accelerator operator could not be created (" + t + ")");
+        }
+    }
+
+    /**
+     * Gives a reserved staging arena back, where one was reserved and nothing else owns it.
+     *
+     * <p>Safe to call with an arena a guard has already taken: {@code close()} is idempotent, and
+     * on a failure path the guard holding it was never returned to the task. Failures here are
+     * logged rather than thrown, because this runs while already handling a failure and the
+     * accelerator decline is the more useful thing for the caller to see.
+     */
+    private static void releaseStaging(@Nullable ManagedOffHeapArena staging) {
+        if (staging == null) {
+            return;
+        }
+        try {
+            staging.close();
+        } catch (Throwable t) {
+            LOG.warn("could not release accelerator staging memory after a failed build", t);
         }
     }
 

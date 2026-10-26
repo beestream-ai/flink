@@ -50,10 +50,10 @@ import org.apache.flink.table.planner.plan.nodes.exec.spec.OverSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
 import org.apache.flink.table.runtime.operators.join.FlinkJoinType;
 import org.apache.flink.table.types.logical.DecimalType;
-import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
 import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
 import org.apache.calcite.rel.core.AggregateCall;
@@ -288,9 +288,8 @@ public final class AccelIrBuilder {
      * could throw nearly all of it away.
      *
      * <p>Empty when the range does not start at the first row. {@code limitStart} is an offset into
-     * the ordering, and an offset is not expressible here: a provider is asked for the first
-     * {@code N} of a permutation, not a window of it, and the node has nowhere to put the
-     * difference.
+     * the ordering, and an offset is not expressible here: a provider is asked for the first {@code
+     * N} of a permutation, not a window of it, and the node has nowhere to put the difference.
      *
      * @param limitStart first row of the ordering to emit, which must be 0
      * @param limitEnd one past the last row of the ordering to emit
@@ -323,9 +322,9 @@ public final class AccelIrBuilder {
      * always the {@link AccelScan} itself; it may now also be an {@link AccelProject} over one, in
      * which case the summed field indexes the projection's output and not the file's columns.
      *
-     * <p>An empty {@code grouping} is admitted and means a global sum. Flink only ever asks for
-     * one on the <em>local</em> half of a two-phase aggregate, so the answer a provider returns is
-     * a partial that the {@code Final} aggregate above the substitution combines — one row per
+     * <p>An empty {@code grouping} is admitted and means a global sum. Flink only ever asks for one
+     * on the <em>local</em> half of a two-phase aggregate, so the answer a provider returns is a
+     * partial that the {@code Final} aggregate above the substitution combines — one row per
      * subtask, not one row for the query.
      *
      * @param grouping key field indexes into {@code inputType}, possibly empty
@@ -393,8 +392,12 @@ public final class AccelIrBuilder {
                 return Optional.empty();
             }
             if (!aggCalls.get(0).getArgList().isEmpty()
-                    && !valueType.getTypeRoot().equals(inputType.getTypeAt(
-                            aggCalls.get(0).getArgList().get(0)).getTypeRoot())) {
+                    && !valueType
+                            .getTypeRoot()
+                            .equals(
+                                    inputType
+                                            .getTypeAt(aggCalls.get(0).getArgList().get(0))
+                                            .getTypeRoot())) {
                 return Optional.empty();
             }
             accelCalls.add(new AccelAggCall(function, valueField, valueType));
@@ -416,8 +419,7 @@ public final class AccelIrBuilder {
                 return Optional.empty();
             }
         }
-        return Optional.of(
-                new AccelAggregate(grouping.clone(), accelCalls, input, outputType));
+        return Optional.of(new AccelAggregate(grouping.clone(), accelCalls, input, outputType));
     }
 
     /**
@@ -432,11 +434,11 @@ public final class AccelIrBuilder {
      *
      * <p>Refusals here are of shape. The condition has to be one equality between one column of
      * each side, because anything else is a predicate over a <em>pair</em> of rows and this IR has
-     * no node that evaluates one. The type has to be an inner join, because an outer one emits
-     * rows with no partner and the region's output would then depend on which pairs did not
-     * match. Both keys have to be {@code INT NOT NULL}: a device column has no representation for
-     * a null, and SQL says a null key matches nothing while a column with no mask would match it
-     * to every other null.
+     * no node that evaluates one. The type has to be an inner join, because an outer one emits rows
+     * with no partner and the region's output would then depend on which pairs did not match. Both
+     * keys have to be {@code INT NOT NULL}: a device column has no representation for a null, and
+     * SQL says a null key matches nothing while a column with no mask would match it to every other
+     * null.
      *
      * @param leftIsBuild which side the planner chose to build, which decides nothing about the
      *     output and everything about which side has to be resident
@@ -517,13 +519,13 @@ public final class AccelIrBuilder {
      * A projection rooted at the device subtree that feeds it rather than at an anonymous input.
      *
      * <p>The mirror of {@link #buildTopNOverScan} for a {@link org.apache.flink.table.planner.plan
-     * .nodes.exec.batch.BatchExecCalc}: {@link #buildCalc} roots the same expressions at an
-     * {@link AccelInput}, meaning "rows arrive, already on the host", which is the right answer
-     * when the Calc is offloaded on its own. Rooted at a scan instead, the projection is something
-     * an operator <em>above</em> it can keep on the device.
+     * .nodes.exec.batch.BatchExecCalc}: {@link #buildCalc} roots the same expressions at an {@link
+     * AccelInput}, meaning "rows arrive, already on the host", which is the right answer when the
+     * Calc is offloaded on its own. Rooted at a scan instead, the projection is something an
+     * operator <em>above</em> it can keep on the device.
      *
-     * <p>A filter is refused rather than rendered. The generator can write one, but it writes it
-     * as a mask the host then compacts, and nothing here yet consumes a masked device batch — so
+     * <p>A filter is refused rather than rendered. The generator can write one, but it writes it as
+     * a mask the host then compacts, and nothing here yet consumes a masked device batch — so
      * admitting one would produce a subtree whose row count is a lie.
      */
     public static Optional<AccelNode> buildProjectOver(
@@ -569,8 +571,8 @@ public final class AccelIrBuilder {
      *
      * <p>The difference is the whole of M9: an {@link AccelInput} says "rows arrive, already on the
      * host", so a provider handed one can at best decorate work that has already been paid for. An
-     * {@link AccelScan} says "here is the file", which is a question a provider can answer by
-     * never bringing the rows to the host at all.
+     * {@link AccelScan} says "here is the file", which is a question a provider can answer by never
+     * bringing the rows to the host at all.
      *
      * <p>Refuses the same shapes {@link #buildTopN} refuses, and for the same reasons: one sort
      * key, no offset, a positive limit.
@@ -794,6 +796,15 @@ public final class AccelIrBuilder {
         Serializable box;
         if (value == null) {
             box = null;
+        } else if (value instanceof Number && isIntegral(type.get())) {
+            // Boxed to match the declared type rather than as a Double like everything else.
+            // An AccelLiteral pairs a value with a LogicalType, and a consumer is entitled to
+            // read the one through the other; handing it a Double beside an IntType makes the
+            // pair disagree, and a BIGINT past 2^53 loses digits here rather than at the point
+            // some provider decides it can afford to. The approximate and decimal paths below
+            // stay on double deliberately -- see asFlinkDouble, which reproduces Flink's own
+            // rounding and must not be routed around.
+            box = asIntegral((Number) value, type.get());
         } else if (value instanceof BigDecimal) {
             box = asFlinkDouble((BigDecimal) value, type.get());
         } else if (value instanceof Number) {
@@ -847,6 +858,33 @@ public final class AccelIrBuilder {
             }
         }
         return value.doubleValue();
+    }
+
+    /** Whether the declared type is one whose literals are carried as an integral box. */
+    private static boolean isIntegral(LogicalType declared) {
+        switch (declared.getTypeRoot()) {
+            case TINYINT:
+            case SMALLINT:
+            case INTEGER:
+            case BIGINT:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** The literal in the box its declared type names. */
+    private static Serializable asIntegral(Number value, LogicalType declared) {
+        switch (declared.getTypeRoot()) {
+            case TINYINT:
+                return value.byteValue();
+            case SMALLINT:
+                return value.shortValue();
+            case INTEGER:
+                return value.intValue();
+            default:
+                return value.longValue();
+        }
     }
 
     private static Optional<LogicalType> logicalType(RexNode node) {

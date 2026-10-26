@@ -174,7 +174,10 @@ public class BatchExecAcceleratedSort extends ExecNodeBase<RowData>
                         (RowType) getOutputType(),
                         config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_BATCH_SIZE),
                         config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP));
-        return new GpuOrCpuCalcOperatorFactory(spec, onCpu);
+        return new GpuOrCpuCalcOperatorFactory(
+                spec,
+                onCpu,
+                config.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_MAX_PARALLELISM));
     }
 
     /**

@@ -24,6 +24,7 @@ import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.table.accelerator.AccelNode;
+import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.planner.codegen.sort.SortCodeGenerator;
@@ -119,10 +120,6 @@ public class BatchExecSort extends ExecNodeBase<RowData>
                 (Transformation<RowData>) inputEdge.translateToPlan(planner);
 
         RowType inputType = (RowType) inputEdge.getOutputType();
-        SortCodeGenerator codeGen =
-                new SortCodeGenerator(
-                        config, planner.getFlinkContext().getClassLoader(), inputType, sortSpec);
-
         GeneratedSort generated = generateSortOperator(planner, config);
         return ExecNodeUtil.createOneInputTransformation(
                 inputTransform,
@@ -232,7 +229,7 @@ public class BatchExecSort extends ExecNodeBase<RowData>
     public RowCost estimateRowCost() {
         RowType inputType = (RowType) getInputEdges().get(0).getOutputType();
         double rows = getEstimatedRowCount();
-        long estimated = rows <= 0 ? 0L : (long) rows;
+        long estimated = rows <= 0 ? AccelWorkProfile.UNKNOWN_ROWS : (long) rows;
         return GpuSortSupport.estimate(sortSpec, inputType, estimated);
     }
 }

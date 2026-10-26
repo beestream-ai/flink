@@ -148,9 +148,9 @@ public final class NumericalProvenance {
     /**
      * Where drift on these input columns lands in a projection's output.
      *
-     * <p>An output column drifts if its expression reads a drifting input column, or if it
-     * computes a drift-prone function of its own — the second case is what makes this composable,
-     * since a chain of projections each adding a little is the normal shape.
+     * <p>An output column drifts if its expression reads a drifting input column, or if it computes
+     * a drift-prone function of its own — the second case is what makes this composable, since a
+     * chain of projections each adding a little is the normal shape.
      *
      * <p>Null when the condition reads a drifting column: that is a filter deciding rows from a
      * value the device rounds differently, which is the case this whole analysis exists to refuse.
@@ -227,8 +227,8 @@ public final class NumericalProvenance {
      * aggregate decides membership <em>of groups</em>, and the groups are decided by its grouping
      * keys alone. A drifting value that feeds only an aggregate call cannot move a row into a
      * different group — it changes what the group sums to, which is a value. The unqualified form
-     * treats the whole node as unsafe and so refuses
-     * {@code SELECT k, SUM(haversine(...)) ... GROUP BY k}, where {@code k} is untouched.
+     * treats the whole node as unsafe and so refuses {@code SELECT k, SUM(haversine(...)) ... GROUP
+     * BY k}, where {@code k} is untouched.
      *
      * <p>{@code drifting} is indexed into this node's output row, which is the aggregate's input
      * row, so the grouping keys are in the same index space. Null means "assume every column", and
@@ -240,10 +240,15 @@ public final class NumericalProvenance {
             java.util.Map<ExecNode<?>, List<ExecNode<?>>> consumers,
             @Nullable Set<Integer> drifting) {
         final java.util.Deque<Reach> pending = new java.util.ArrayDeque<>();
-        final Set<ExecNode<?>> seen =
-                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        // What drift each node has already been walked with. A node can be reached twice with
+        // different answers -- a diamond, where one branch forwards a narrow set and the other
+        // gives up and returns null -- and taking whichever arrived first lets the narrow set
+        // displace the unknown one, which is an under-approximation in an analysis whose
+        // stance is that anything it cannot account for is unsafe. So null absorbs, and two
+        // sets merge; both only ever widen, which is what makes this terminate.
+        final java.util.Map<ExecNode<?>, Set<Integer>> reached = new java.util.IdentityHashMap<>();
         pending.add(new Reach(node, drifting));
-        seen.add(node);
+        reached.put(node, drifting);
         while (!pending.isEmpty()) {
             final Reach current = pending.poll();
             for (ExecNode<?> consumer : consumers.getOrDefault(current.node, java.util.List.of())) {
@@ -251,9 +256,28 @@ public final class NumericalProvenance {
                 if (!isValueOnly(consumer) && forwarded == null) {
                     return false;
                 }
-                if (seen.add(consumer)) {
+                if (!reached.containsKey(consumer)) {
+                    reached.put(consumer, forwarded);
                     pending.add(new Reach(consumer, forwarded));
+                    continue;
                 }
+                final Set<Integer> already = reached.get(consumer);
+                if (already == null) {
+                    // Walked with "every column drifts", which subsumes anything narrower.
+                    continue;
+                }
+                if (forwarded == null) {
+                    reached.put(consumer, null);
+                    pending.add(new Reach(consumer, null));
+                    continue;
+                }
+                if (already.containsAll(forwarded)) {
+                    continue;
+                }
+                final Set<Integer> merged = new java.util.LinkedHashSet<>(already);
+                merged.addAll(forwarded);
+                reached.put(consumer, merged);
+                pending.add(new Reach(consumer, merged));
             }
         }
         return true;
@@ -354,8 +378,7 @@ public final class NumericalProvenance {
                 if (spec == null) {
                     return null;
                 }
-                final java.lang.reflect.Method keys =
-                        spec.getClass().getMethod("getFieldIndices");
+                final java.lang.reflect.Method keys = spec.getClass().getMethod("getFieldIndices");
                 keys.setAccessible(true);
                 final Object indices = keys.invoke(spec);
                 return indices instanceof int[] ? (int[]) indices : null;
@@ -428,7 +451,9 @@ public final class NumericalProvenance {
         return forwarded;
     }
 
-    /** The grouping keys, read reflectively; null when absent or unreadable — the safe direction. */
+    /**
+     * The grouping keys, read reflectively; null when absent or unreadable — the safe direction.
+     */
     @Nullable
     private static int[] groupingOf(ExecNode<?> consumer) {
         for (Class<?> type = consumer.getClass(); type != null; type = type.getSuperclass()) {
@@ -491,17 +516,28 @@ public final class NumericalProvenance {
     /**
      * Whether a {@code Calc}-like node carries a filter condition.
      *
-     * <p>Reflective because {@code condition} is private to the node and this analysis lives
-     * outside it; a node that does not expose one is treated as though it filters, which is the
-     * safe direction.
+     * <p>Reflective because {@code condition} is not exposed to this analysis, which lives outside
+     * the node; a node that does not declare one at all is treated as though it filters, which is
+     * the safe direction.
+     *
+     * <p>The walk up the superclass chain is the point, as it is in {@link #sortKeysOf} and {@link
+     * #groupingOf}: {@code condition} is declared on {@code CommonExecCalc}, not on the concrete
+     * {@code BatchExecCalc}, so asking the concrete class alone throws {@code NoSuchFieldException}
+     * for every Calc there is and answers "it filters" for all of them -- including a pure
+     * projection, which is the case this exists to recognise.
      */
     private static boolean hasCondition(ExecNode<?> consumer) {
-        try {
-            final java.lang.reflect.Field field = consumer.getClass().getDeclaredField("condition");
-            field.setAccessible(true);
-            return field.get(consumer) != null;
-        } catch (ReflectiveOperationException | RuntimeException notVisible) {
-            return true;
+        for (Class<?> type = consumer.getClass(); type != null; type = type.getSuperclass()) {
+            try {
+                final java.lang.reflect.Field field = type.getDeclaredField("condition");
+                field.setAccessible(true);
+                return field.get(consumer) != null;
+            } catch (NoSuchFieldException keepLooking) {
+                // Declared further up, or not at all.
+            } catch (ReflectiveOperationException | RuntimeException notVisible) {
+                return true;
+            }
         }
+        return true;
     }
 }
