@@ -1344,15 +1344,21 @@ public class ExecutionConfigOptions {
     public static final ConfigOption<Double> TABLE_EXEC_ACCELERATOR_MIN_SPEEDUP =
             ConfigOptions.key("table.exec.accelerator.min-speedup")
                     .doubleType()
-                    .defaultValue(1.0)
+                    .defaultValue(0.0)
                     .withDescription(
                             "How much faster than the CPU a provider must claim to be before its "
                                     + "plan is preferred. Compared against the provider's own "
                                     + "estimate for its own device, made on the TaskManager. Not "
                                     + "a hardware constant: it means the same on any accelerator. "
-                                    + "The default of 1.0 offloads whenever a provider expects to "
-                                    + "be no slower than the CPU; it was 1.3, which declined work "
-                                    + "the device would have won or drawn.");
+                                    + "Zero, the default, disables the profitability gate "
+                                    + "entirely: anything a provider can express is offloaded, "
+                                    + "and neither the claimed speed-up nor the repayment of "
+                                    + "setup cost is consulted. Refusals a provider makes because "
+                                    + "it cannot express an operator are unaffected and still "
+                                    + "apply. Set a positive value to re-enable the gate once a "
+                                    + "provider calibrates its own cost constants to the machine "
+                                    + "it is running on; until then those constants are fixed at "
+                                    + "build time and do not survive a change of device.");
 
     /**
      * The largest subtask parallelism at which a node may still be offloaded.

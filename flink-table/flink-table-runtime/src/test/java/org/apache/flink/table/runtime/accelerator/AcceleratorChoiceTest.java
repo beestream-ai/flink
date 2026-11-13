@@ -156,6 +156,49 @@ class AcceleratorChoiceTest {
         assertThat(outcome.accelerated()).isTrue();
     }
 
+    @Test
+    @DisplayName("the gate off: a plan the cost model would refuse is offloaded anyway")
+    void gateOffAcceptsWhatTheCostModelWouldRefuse() {
+        // Exactly the plan tooFewRowsToRepaySetup refuses: 10 rows against 20 ms of setup.
+        AcceleratorChoice.Outcome outcome =
+                AcceleratorChoice.choose(
+                        provider(new AcceleratorCost(50.0, 20_000_000L, 0L)),
+                        SUBTREE,
+                        work(1),
+                        0.0,
+                        10L);
+
+        assertThat(outcome.accelerated()).isTrue();
+        assertThat(outcome.reason()).contains("profitability gate is off");
+    }
+
+    @Test
+    @DisplayName("the gate off: even a provider that claims to be slower than the CPU is taken")
+    void gateOffIgnoresAClaimedSlowdown() {
+        // The provider's own estimate rests on constants fixed when it was built, so a claimed
+        // slowdown on this machine is not evidence about the machine it is running on. With the
+        // gate off the claim is not consulted at all.
+        AcceleratorChoice.Outcome outcome =
+                AcceleratorChoice.choose(
+                        provider(new AcceleratorCost(0.1, 0L, 0L)), SUBTREE, work(20), 0.0, 1_000L);
+
+        assertThat(outcome.accelerated()).isTrue();
+    }
+
+    @Test
+    @DisplayName("the gate off does not override a provider that cannot express the subtree")
+    void gateOffStillRespectsExpressibilityRefusals() {
+        // The distinction the whole change rests on: profitability is Flink's to weigh and is
+        // switched off here, but whether a device can compute an operator at all is the
+        // provider's to answer, and no setting overrides it.
+        // provider(null) is the stub's way of declining, as decliningIsOrdinary uses it.
+        AcceleratorChoice.Outcome outcome =
+                AcceleratorChoice.choose(provider(null), SUBTREE, work(20), 0.0, 1_000_000L);
+
+        assertThat(outcome.accelerated()).isFalse();
+        assertThat(outcome.reason()).contains("declined");
+    }
+
     // ------------------------------------------------------------------
 
     private static AcceleratorProvider provider(AcceleratorCost cost) {

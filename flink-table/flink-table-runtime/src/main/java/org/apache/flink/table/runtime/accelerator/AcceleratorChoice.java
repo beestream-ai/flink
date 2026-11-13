@@ -98,7 +98,9 @@ public final class AcceleratorChoice {
      * @param minSpeedup how much faster than the CPU a provider must claim to be before Flink
      *     prefers it. A <em>policy</em> constant — how much margin Flink wants before taking an
      *     unfamiliar execution path — not a device constant. It means the same thing on every
-     *     accelerator, which is exactly what the floors it replaces did not.
+     *     accelerator, which is exactly what the floors it replaces did not. <b>Zero disables the
+     *     profitability gate</b>: the provider's cost estimate is not consulted at all, and its
+     *     expressibility refusals are the only thing that declines a subtree.
      * @param estimatedRows the planner's cardinality estimate, or {@link
      *     AccelWorkProfile#UNKNOWN_ROWS}
      */
@@ -126,6 +128,37 @@ public final class AcceleratorChoice {
         }
 
         AcceleratorCost cost = offered.get().cost();
+
+        // The profitability gate, off by default.
+        //
+        // Both checks below rest on the provider's own cost constants, and a provider's constants
+        // are fixed when it is built: nanoseconds per operation, per byte transferred, and for
+        // compiling one kernel, all measured on whatever machine the author had. They do not
+        // survive a change of device. The same jar on a laptop and on an A100 server prices the
+        // identical query identically, and is wrong in both directions at once -- FP64 alone
+        // differs by more than an order of magnitude between those two cards, so a model
+        // calibrated on the laptop declines work the server would win comfortably.
+        //
+        // Until a provider measures its own rates on the machine it is running on, refusing on
+        // those numbers refuses on the author's hardware rather than the operator's. The two
+        // errors are not symmetric: a wrong decline silently discards the whole speed-up, which
+        // has been measured here at 3.5x to 7x for one over-conservative floor, while the worst
+        // measured wrong offload was about 2.1x slower than a vectorised CPU core. Neither is a
+        // correctness question -- the answer is identical either way.
+        //
+        // Zero means the gate is off. What it does NOT disable is anything a provider refuses
+        // because it cannot express an operator: those refusals are about what a device can
+        // compute, not about what it is worth, and they are the provider's to make.
+        if (minSpeedup <= 0.0) {
+            return new Outcome(
+                    offered,
+                    AcceleratorDeclineReason.ACCELERATED,
+                    String.format(
+                            "provider %s accepted the subtree; the profitability gate is off"
+                                    + " (%s = 0)",
+                            provider.name(), "table.exec.accelerator.min-speedup"));
+        }
+
         if (cost.speedupOverCpu() < minSpeedup) {
             return cpu(
                     AcceleratorDeclineReason.BELOW_MIN_SPEEDUP,

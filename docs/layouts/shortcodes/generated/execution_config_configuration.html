@@ -9,6 +9,12 @@
     </thead>
     <tbody>
         <tr>
+            <td><h5>table.exec.accelerator.approximate-projections</h5><br> <span class="label label-primary">Batch</span></td>
+            <td style="word-wrap: break-word;">false</td>
+            <td>Boolean</td>
+            <td>Whether an accelerated subtree may compute values a device rounds differently from Flink. Off by default; turning it on gives up the output-value guarantee, and the set of rows returned is unchanged either way.</td>
+        </tr>
+        <tr>
             <td><h5>table.exec.accelerator.batch-size</h5><br> <span class="label label-primary">Batch</span></td>
             <td style="word-wrap: break-word;">262144</td>
             <td>Integer</td>
@@ -30,13 +36,13 @@
             <td><h5>table.exec.accelerator.device.resource-name</h5><br> <span class="label label-primary">Batch</span></td>
             <td style="word-wrap: break-word;">"gpu"</td>
             <td>String</td>
-            <td>External resource name to request, matching the TaskManager&#x27;s external-resource.&lt;name&gt;.amount.</td>
+            <td>External resource name to request, matching the TaskManager's external-resource.&lt;name&gt;.amount.</td>
         </tr>
         <tr>
             <td><h5>table.exec.accelerator.device.slot-sharing-group</h5><br> <span class="label label-primary">Batch</span></td>
             <td style="word-wrap: break-word;">"accelerator"</td>
             <td>String</td>
-            <td>Slot sharing group carrying the device requirement. Cannot be &quot;default&quot;: Flink ignores resources registered for that name. Because the group must therefore be a distinct one, the offloaded node is no longer chained to its input.</td>
+            <td>Slot sharing group carrying the device requirement. Cannot be "default": Flink ignores resources registered for that name. Because the group must therefore be a distinct one, the offloaded node is no longer chained to its input.</td>
         </tr>
         <tr>
             <td><h5>table.exec.accelerator.device.task-heap</h5><br> <span class="label label-primary">Batch</span></td>
@@ -60,13 +66,19 @@
             <td><h5>table.exec.accelerator.fuse-aggregate</h5><br> <span class="label label-primary">Batch</span></td>
             <td style="word-wrap: break-word;">false</td>
             <td>Boolean</td>
-            <td>If true, an ungrouped SUM over an offloaded Calc is fused with it into one operator. Off by default: the fused pair has no accelerator implementation yet, so fusing it takes away the projection&#x27;s own accelerator path and gives back only what operator chaining already did. Turn on to measure fusion, or once a fused pair can run on a device.</td>
+            <td>If true, an ungrouped SUM over an offloaded Calc is fused with it into one operator. Off by default: the fused pair has no accelerator implementation yet, so fusing it takes away the projection's own accelerator path and gives back only what operator chaining already did. Turn on to measure fusion, or once a fused pair can run on a device.</td>
+        </tr>
+        <tr>
+            <td><h5>table.exec.accelerator.max-parallelism</h5><br> <span class="label label-primary">Batch</span></td>
+            <td style="word-wrap: break-word;">1</td>
+            <td>Integer</td>
+            <td>The largest subtask parallelism at which a node may be offloaded. Above it the generated CPU operator runs instead and the decision metric reports PARALLELISM_ABOVE_SUPPORTED. The default of 1 contains an unexplained intermittent CUDA launch failure seen at higher parallelism on a single device; it is not a performance setting.</td>
         </tr>
         <tr>
             <td><h5>table.exec.accelerator.min-speedup</h5><br> <span class="label label-primary">Batch</span></td>
-            <td style="word-wrap: break-word;">1.0</td>
+            <td style="word-wrap: break-word;">0.0</td>
             <td>Double</td>
-            <td>How much faster than the CPU a provider must claim to be before its plan is preferred. Compared against the provider&#x27;s own estimate for its own device, made on the TaskManager. Not a hardware constant: it means the same on any accelerator. The default of 1.0 offloads whenever a provider expects to be no slower than the CPU; it was 1.3, which declined work the device would have won or drawn.</td>
+            <td>How much faster than the CPU a provider must claim to be before its plan is preferred. Compared against the provider's own estimate for its own device, made on the TaskManager. Not a hardware constant: it means the same on any accelerator. Zero, the default, disables the profitability gate entirely: anything a provider can express is offloaded, and neither the claimed speed-up nor the repayment of setup cost is consulted. Refusals a provider makes because it cannot express an operator are unaffected and still apply. Set a positive value to re-enable the gate once a provider calibrates its own cost constants to the machine it is running on; until then those constants are fixed at build time and do not survive a change of device.</td>
         </tr>
         <tr>
             <td><h5>table.exec.accelerator.require-device</h5><br> <span class="label label-primary">Batch</span></td>
