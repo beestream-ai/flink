@@ -79,6 +79,21 @@ public final class AccelWorkProfile implements Serializable {
      */
     private final boolean strictArithmetic;
 
+    /**
+     * Calls to a user's scalar function, which the planner counts but cannot weigh.
+     *
+     * <p>{@link #opsPerRow} is indexed by {@link AccelFunction}, and a user's function is none of
+     * them: what it costs is in a method body the planner does not read, by design -- weighing it
+     * would mean a bytecode library in {@code flink-table-planner}. So the call is reported and
+     * the weighing is left to the provider, which reads the body anyway to decide whether it can
+     * lower it at all.
+     *
+     * <p>Kept out of {@link #totalOpsPerRow()} for the same reason: that figure feeds a ceiling on
+     * expression size, and a number nobody measured has no business moving a ceiling. It is here
+     * so that a subtree whose only work is a user function is not mistaken for one with no work.
+     */
+    private final int userCalls;
+
     public AccelWorkProfile(
             int[] opsPerRow, int inputBytesPerRow, int outputBytesPerRow, long estimatedRows) {
         this(opsPerRow, inputBytesPerRow, outputBytesPerRow, estimatedRows, false);
@@ -102,6 +117,31 @@ public final class AccelWorkProfile implements Serializable {
         this.outputBytesPerRow = outputBytesPerRow;
         this.estimatedRows = estimatedRows;
         this.strictArithmetic = strictArithmetic;
+        this.userCalls = 0;
+    }
+
+    private AccelWorkProfile(AccelWorkProfile from, int userCalls) {
+        this.opsPerRow = from.opsPerRow.clone();
+        this.inputBytesPerRow = from.inputBytesPerRow;
+        this.outputBytesPerRow = from.outputBytesPerRow;
+        this.estimatedRows = from.estimatedRows;
+        this.strictArithmetic = from.strictArithmetic;
+        this.userCalls = userCalls;
+    }
+
+    /** The same work, with one more call to a user's scalar function counted. */
+    public AccelWorkProfile withUserCall() {
+        return new AccelWorkProfile(this, userCalls + 1);
+    }
+
+    /** How many calls to a user's scalar function a row makes. See {@link #userCalls}. */
+    public int userCalls() {
+        return userCalls;
+    }
+
+    /** Whether a row does anything at all -- built-in arithmetic or a user's function. */
+    public boolean hasWork() {
+        return totalOpsPerRow() > 0 || userCalls > 0;
     }
 
     /** See {@link #strictArithmetic}. */
@@ -142,13 +182,16 @@ public final class AccelWorkProfile implements Serializable {
             rows = Math.max(estimatedRows, other.estimatedRows);
         }
         return new AccelWorkProfile(
-                sum,
-                Math.max(inputBytesPerRow, other.inputBytesPerRow),
-                other.outputBytesPerRow,
-                rows,
-                // Strictness is a requirement, so it survives grouping: if either member of a
-                // group must round the way the CPU does, the kernel they compile into must.
-                strictArithmetic || other.strictArithmetic);
+                new AccelWorkProfile(
+                        sum,
+                        Math.max(inputBytesPerRow, other.inputBytesPerRow),
+                        other.outputBytesPerRow,
+                        rows,
+                        // Strictness is a requirement, so it survives grouping: if either member
+                        // of a group must round the way the CPU does, the kernel they compile
+                        // into must.
+                        strictArithmetic || other.strictArithmetic),
+                userCalls + other.userCalls);
     }
 
     /** Every count, indexed by {@link AccelFunction#ordinal()}. */

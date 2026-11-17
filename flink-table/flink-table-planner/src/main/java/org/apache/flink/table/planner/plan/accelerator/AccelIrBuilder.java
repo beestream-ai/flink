@@ -34,12 +34,14 @@ import org.apache.flink.table.accelerator.AccelNode;
 import org.apache.flink.table.accelerator.AccelOverAggregate;
 import org.apache.flink.table.accelerator.AccelProject;
 import org.apache.flink.table.accelerator.AccelScan;
+import org.apache.flink.table.accelerator.AccelUdfCall;
 import org.apache.flink.table.accelerator.AccelSort;
 import org.apache.flink.table.accelerator.AccelWorkProfile;
 import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.DecimalDataUtils;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.functions.FunctionDefinition;
+import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
@@ -70,6 +72,7 @@ import javax.annotation.Nullable;
 import java.io.Serializable;
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -193,9 +196,6 @@ public final class AccelIrBuilder {
         }
         RexCall call = (RexCall) node;
         AccelFunction function = functionOf(call);
-        if (function == null) {
-            return Optional.empty();
-        }
         List<AccelExpression> operands = new ArrayList<>(call.getOperands().size());
         for (RexNode operand : call.getOperands()) {
             Optional<AccelExpression> converted = convert(operand);
@@ -204,7 +204,77 @@ public final class AccelIrBuilder {
             }
             operands.add(converted.get());
         }
+        if (function == null) {
+            // Not a built-in. It may still be a user's scalar function, whose body can hold what
+            // an expression tree structurally cannot -- a loop, an accumulator, an early return --
+            // which is the whole reason it is worth naming rather than refusing. Whether it can
+            // actually run on a device is the provider's question, not this one's.
+            return userDefinedCall(call, operands);
+        }
         return logicalType(call).map(type -> new AccelCall(function, operands, type));
+    }
+
+    /**
+     * Names a user's {@code ScalarFunction} call, when that is what this is.
+     *
+     * <p>Only the name travels. The IR goes into the JobGraph and a TaskManager resolves the class
+     * against the user code classloader it already has, so nothing here loads the function's class
+     * or reads its body.
+     */
+    private static Optional<AccelExpression> userDefinedCall(
+            RexCall call, List<AccelExpression> operands) {
+        final Method method = userDefinedEval(call);
+        if (method == null) {
+            return Optional.empty();
+        }
+        Class<?> declaring = method.getDeclaringClass();
+        return logicalType(call)
+                .map(
+                        type ->
+                                new AccelUdfCall(
+                                        declaring.getName(),
+                                        method.getName(),
+                                        descriptorOf(method),
+                                        operands,
+                                        type));
+    }
+
+    /** A JVM method descriptor, built here so the planner needs no bytecode library. */
+    private static String descriptorOf(Method method) {
+        StringBuilder descriptor = new StringBuilder("(");
+        for (Class<?> parameter : method.getParameterTypes()) {
+            appendDescriptor(descriptor, parameter);
+        }
+        descriptor.append(')');
+        appendDescriptor(descriptor, method.getReturnType());
+        return descriptor.toString();
+    }
+
+    private static void appendDescriptor(StringBuilder out, Class<?> type) {
+        if (type.isArray()) {
+            out.append('[');
+            appendDescriptor(out, type.getComponentType());
+        } else if (type == boolean.class) {
+            out.append('Z');
+        } else if (type == byte.class) {
+            out.append('B');
+        } else if (type == char.class) {
+            out.append('C');
+        } else if (type == short.class) {
+            out.append('S');
+        } else if (type == int.class) {
+            out.append('I');
+        } else if (type == long.class) {
+            out.append('J');
+        } else if (type == float.class) {
+            out.append('F');
+        } else if (type == double.class) {
+            out.append('D');
+        } else if (type == void.class) {
+            out.append('V');
+        } else {
+            out.append('L').append(type.getName().replace('.', '/')).append(';');
+        }
     }
 
     /**
@@ -725,7 +795,43 @@ public final class AccelIrBuilder {
      * whatever the runtime could execute -- and nothing kept them in step.
      */
     public static boolean supports(RexCall call) {
-        return functionOf(call) != null;
+        // Built-ins, and a user's scalar function that this builder can name.
+        //
+        // These two have to agree. The cost estimator asks this before anything is converted, so
+        // a call admitted by convert() and refused here never reaches a provider at all -- it is
+        // reported as "no accelerator IR for operator <name>" in EXPLAIN, which is true of the
+        // estimator's view and false of the builder's.
+        return functionOf(call) != null || userDefinedEval(call) != null;
+    }
+
+    /**
+     * The {@code eval} a user's scalar function would be called through, or null if this is not
+     * one.
+     *
+     * <p>Resolved by arity. Several overloads of the same arity mean guessing at the planner's own
+     * overload resolution, and guessing wrong computes a different column, so that is refused.
+     */
+    private static @Nullable Method userDefinedEval(RexCall call) {
+        SqlOperator operator = call.getOperator();
+        if (!(operator instanceof BridgingSqlFunction)) {
+            return null;
+        }
+        FunctionDefinition definition = ((BridgingSqlFunction) operator).getDefinition();
+        if (!(definition instanceof ScalarFunction)) {
+            return null;
+        }
+        Method chosen = null;
+        for (Method candidate : definition.getClass().getMethods()) {
+            if (!"eval".equals(candidate.getName())
+                    || candidate.getParameterCount() != call.getOperands().size()) {
+                continue;
+            }
+            if (chosen != null) {
+                return null;
+            }
+            chosen = candidate;
+        }
+        return chosen;
     }
 
     /** Counts the work a set of expressions performs on each input row. */
@@ -735,18 +841,31 @@ public final class AccelIrBuilder {
             int outputBytesPerRow,
             long estimatedRows) {
         int[] counts = new int[AccelFunction.values().length];
+        int[] userCalls = new int[1];
         for (AccelExpression expression : expressions) {
-            count(expression, counts);
+            count(expression, counts, userCalls);
         }
-        return new AccelWorkProfile(counts, inputBytesPerRow, outputBytesPerRow, estimatedRows);
+        AccelWorkProfile profile =
+                new AccelWorkProfile(counts, inputBytesPerRow, outputBytesPerRow, estimatedRows);
+        for (int i = 0; i < userCalls[0]; i++) {
+            profile = profile.withUserCall();
+        }
+        return profile;
     }
 
-    private static void count(AccelExpression expression, int[] counts) {
+    private static void count(AccelExpression expression, int[] counts, int[] userCalls) {
         if (expression instanceof AccelCall) {
             AccelCall call = (AccelCall) expression;
             counts[call.function().ordinal()]++;
             for (AccelExpression operand : call.operands()) {
-                count(operand, counts);
+                count(operand, counts, userCalls);
+            }
+        } else if (expression instanceof AccelUdfCall) {
+            // Counted, not weighed. What the body costs is not knowable here -- see
+            // AccelWorkProfile#userCalls.
+            userCalls[0]++;
+            for (AccelExpression operand : ((AccelUdfCall) expression).operands()) {
+                count(operand, counts, userCalls);
             }
         }
     }

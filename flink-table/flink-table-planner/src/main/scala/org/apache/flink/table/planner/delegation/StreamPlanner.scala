@@ -22,6 +22,7 @@ import org.apache.flink.api.dag.Transformation
 import org.apache.flink.configuration.ExecutionOptions
 import org.apache.flink.streaming.api.graph.StreamGraph
 import org.apache.flink.table.api._
+import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.catalog.{CatalogManager, FunctionCatalog}
 import org.apache.flink.table.delegation.{Executor, InternalPlan}
 import org.apache.flink.table.module.ModuleManager
@@ -73,7 +74,24 @@ class StreamPlanner(
 
   override protected def getOptimizer: Optimizer = new StreamCommonSubGraphBasedOptimizer(this)
 
-  override def getExecNodeGraphProcessors: Seq[ExecNodeGraphProcessor] = Seq()
+  override def getExecNodeGraphProcessors: Seq[ExecNodeGraphProcessor] = {
+    // No processor here, and one line saying so when it matters.
+    //
+    // GpuOffloadProcessor runs from BatchPlanner only, so with this planner nothing is ever
+    // offered to an accelerator. That is correct -- the offload path is bounded-batch work -- but
+    // silence about it has cost real time: `table.exec.accelerator.enabled` is accepted, the job
+    // runs, every answer is right, and nothing anywhere says why the device was never touched.
+    // The SQL client defaults to streaming, so this is the ordinary way to meet it rather than an
+    // unusual one.
+    if (getTableConfig.get(ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED)) {
+      StreamPlanner.LOG.info(
+        "{} is set, but accelerator offload is implemented for bounded batch execution only and " +
+          "this is a streaming plan, so nothing will be offered to a provider. Set " +
+          "'execution.runtime-mode' to 'batch' if offload was intended.",
+        ExecutionConfigOptions.TABLE_EXEC_ACCELERATOR_ENABLED.key())
+    }
+    Seq()
+  }
 
   override protected def translateToPlan(execGraph: ExecNodeGraph): util.List[Transformation[_]] = {
     beforeTranslation()
@@ -204,4 +222,8 @@ class StreamPlanner(
       )
     }
   }
+}
+
+object StreamPlanner {
+  private val LOG: org.slf4j.Logger = org.slf4j.LoggerFactory.getLogger(classOf[StreamPlanner])
 }

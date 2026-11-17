@@ -91,6 +91,31 @@ public final class GpuCostEstimator implements RexVisitor<RowCost> {
             case REAL:
             case BOOLEAN:
                 return true;
+            case ARRAY:
+                // An array of a fixed-width numeric type, which a device holds as offsets plus
+                // one flat run of elements. Admitted as a *column* only: no operator here takes
+                // an array operand, so the only thing that can consume one is a user's function,
+                // and a provider that cannot lower that function declines in the ordinary way.
+                //
+                // Nullability is checked on the element as well as the column. A null element
+                // needs a validity mask that no kernel here reads, so admitting one would mean
+                // computing over whatever bytes happen to sit in the gap.
+                RelDataType element = type.getComponentType();
+                return element != null
+                        && !element.isNullable()
+                        && isFixedWidthNumeric(element.getSqlTypeName());
+            default:
+                return false;
+        }
+    }
+
+    private static boolean isFixedWidthNumeric(SqlTypeName name) {
+        switch (name) {
+            case INTEGER:
+            case FLOAT:
+            case DOUBLE:
+            case REAL:
+                return true;
             default:
                 return false;
         }

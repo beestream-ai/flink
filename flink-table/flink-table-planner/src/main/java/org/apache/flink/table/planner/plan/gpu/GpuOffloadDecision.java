@@ -140,8 +140,13 @@ public final class GpuOffloadDecision {
             return new Verdict(false, null, "not expressible on device: " + cost.rejection());
         }
         AccelWorkProfile work = cost.work();
-        if (work == null || work.totalOpsPerRow() == 0) {
+        if (work == null || !work.hasWork()) {
             // Pure projection: nothing to compute, so nothing to move.
+            //
+            // A call to a user's function counts as work even though the planner cannot weigh it.
+            // Reading totalOpsPerRow alone said a Calc whose only work was a user function had
+            // none, and refused it before any provider was asked -- the one case where the
+            // planner's inability to count became an inability to offer.
             return new Verdict(false, work, "no arithmetic to offload");
         }
         return new Verdict(
